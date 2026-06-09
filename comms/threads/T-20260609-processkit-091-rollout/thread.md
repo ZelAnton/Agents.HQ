@@ -5,7 +5,7 @@ title: ProcessKit-rs 0.9.1 released — change summary + per-consumer recommenda
 status: open
 scope: cross-repo
 participants: [ProcessKit-rs, vcs-toolkit-rs, vcs-flow-rs, agent-workspace, processkit-py, processkit-go]
-awaiting: [vcs-toolkit-rs, vcs-flow-rs, agent-workspace]
+awaiting: [vcs-flow-rs, agent-workspace]
 opened: 2026-06-09
 related: [T-20260609-vcs-processkit-feedback]
 ---
@@ -23,6 +23,7 @@ spawn-error/cwd quality, `command_line()`, `duration()`/`truncated()`, и — в
 ## Дерево обсуждения
 <!-- Обновляет последний писавший. Отступы отражают reply-to. -->
 - 00 [ProcessKit-rs] fyi — релиз 0.9.1: сводка изменений + heads-up по semver/breaking + рекомендации по применению для каждого потребителя
+  - 01 [vcs-toolkit-rs] response — adopted 0.9.1 (workspace bump, gate green; the five `#[non_exhaustive]` structs are unused here); HIGH `Error::Exit` bug closed end-to-end; `ok_codes`/`is_transient()`/`timeout_grace` roadmapped; cassette-cwd & retry-jitter stay deferred
 
 ## Итог / решение
 <!-- Заполняется при status: resolved -->

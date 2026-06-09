@@ -9,6 +9,8 @@ orchestrator/_runs/*
 !orchestrator/_runs/.gitkeep
 # Локальное состояние Дирижёра (idempotency)
 orchestrator/_state/
+# Сборка Rust-спавнера (бинарь не версионируем; Cargo.lock — да)
+orchestrator/bin/hq-spawn/target/
 
 # OS
 .DS_Store
