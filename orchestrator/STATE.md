@@ -15,7 +15,7 @@ updated: 2026-06-09
 - На время тика Дирижёр держит лок-файл **`.hq/orchestrator/.lock`** (git-ignored). Один активный тик.
   Стейл-лок (старше TTL) снимается при старте после проверки, что процесс мёртв.
 
-## Журнал тиков — `tasks/_runs/<run_id>/`
+## Журнал тиков — `orchestrator/_runs/<run_id>/`
 - `run_id`: `YYYYMMDD-HHMM-tick` (live/dry-run) или `fixture-YYYYMMDD-HHMM` (валидация на фикстуре).
 - `tick.json` — по схеме [`schemas/tick-log.schema.json`](schemas/tick-log.schema.json): что просмотрено,
   пропущено, как оттриажено, что заплан��ровано, ошибки.

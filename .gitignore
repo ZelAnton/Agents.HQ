@@ -4,6 +4,11 @@ _local/
 
 # Оркестратор: лок активного тика
 orchestrator/.lock
+# Прогоны (локальный аудит, могут содержать произвольный текст → не в публичный remote); каталог сохраняем
+orchestrator/_runs/*
+!orchestrator/_runs/.gitkeep
+# Локальное состояние Дирижёра (idempotency)
+orchestrator/_state/
 
 # OS
 .DS_Store

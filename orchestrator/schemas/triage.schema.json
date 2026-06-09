@@ -25,10 +25,10 @@
       "additionalProperties": false,
       "required": ["title", "repos", "priority", "sketch"],
       "properties": {
-        "title": { "type": "string" },
-        "repos": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "title": { "type": "string", "minLength": 3 },
+        "repos": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
         "priority": { "enum": ["P0", "P1", "P2"] },
-        "sketch": { "type": "string", "description": "Грубое описание объёма для planner." }
+        "sketch": { "type": "string", "minLength": 10, "description": "Грубое описание объёма для planner." }
       }
     }
   },

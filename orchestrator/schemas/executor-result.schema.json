@@ -10,9 +10,12 @@
     "status": { "enum": ["done", "failed", "needs-clarification", "blocked"] },
     "summary": { "type": "string" },
     "files_changed": { "type": "array", "items": { "type": "string" } },
-    "out_of_scope_touched": { "type": "array", "items": { "type": "string" }, "description": "файлы вне scope_paths (должно быть пусто)" },
-    "build": { "enum": ["ok", "fail", "skipped"] },
-    "tests": { "enum": ["pass", "fail", "skipped"] },
+    "moved": { "type": "array", "items": { "type": "string" }, "description": "перемещённые/переименованные пути (L5): расширяют фактическую область → сериализация" },
+    "deleted": { "type": "array", "items": { "type": "string" } },
+    "restructures": { "type": "boolean", "description": "true ⇒ задача затронула структуру (move/rename/delete) ⇒ отдельная волна, не parallel-safe" },
+    "out_of_scope_touched": { "type": "array", "items": { "type": "string" }, "description": "файлы вне scope_paths (должно быть пусто; непусто ⇒ hard-stop для auto-land)" },
+    "build": { "enum": ["ok", "fail", "skipped"], "description": "skipped трактуется как НЕ-зелёный гейт (M9)" },
+    "tests": { "enum": ["pass", "fail", "skipped"], "description": "skipped трактуется как НЕ-зелёный гейт (M9)" },
     "follow_ups": { "type": "array", "items": { "type": "string" } },
     "questions": { "type": "array", "items": { "type": "string" } }
   }

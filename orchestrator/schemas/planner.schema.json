@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hq/orchestrator/planner",
   "title": "hq-planner output",
-  "description": "Декомпозиция принятой работы на подзадачи + граф зависимостей + волны.",
+  "description": "Декомпозиция принятой работы на подзадачи + граф + волны. ВНИМАНИЕ: planner использует ЛОКАЛЬНЫЕ плейсхолдеры id (T1, T2, …), а НЕ TASK-####. Финальные глобальные номера TASK-#### присваивает Дирижёр детерминированно под локом (planner не знает счётчик очереди и не должен его угадывать).",
   "type": "object",
   "additionalProperties": false,
   "required": ["tasks", "waves"],
@@ -15,30 +15,31 @@
         "additionalProperties": false,
         "required": ["id", "repo", "scope_paths", "depends_on", "parallel_safe_with", "dod", "priority", "spec_md"],
         "properties": {
-          "id": { "type": "string", "pattern": "^TASK-[0-9]{4}$" },
+          "id": { "type": "string", "pattern": "^T[0-9]+$", "description": "ЛОКАЛЬНЫЙ плейсхолдер в пределах этого плана: T1, T2, … (не TASK-####)." },
+          "title": { "type": "string", "minLength": 3, "description": "Короткий заголовок задачи (рекомендуется). Если нет — Дирижёр выведет из spec_md." },
           "repo": { "type": "string", "description": "репо или 'cross'" },
           "scope_paths": {
             "type": "array", "items": { "type": "string" },
             "description": "Объявленная область (файлы/каталоги/модуль). Основа для parallel-safe."
           },
           "depends_on": {
-            "type": "array", "items": { "type": "string", "pattern": "^TASK-[0-9]{4}$" },
-            "description": "только-после: эти задачи должны быть done раньше."
+            "type": "array", "items": { "type": "string", "pattern": "^T[0-9]+$" },
+            "description": "только-после: локальные id из этого же плана."
           },
           "parallel_safe_with": {
-            "type": "array", "items": { "type": "string", "pattern": "^TASK-[0-9]{4}$" },
-            "description": "Безопасно параллельно ТОЛЬКО при непересечении областей. По умолчанию пусто."
+            "type": "array", "items": { "type": "string", "pattern": "^T[0-9]+$" },
+            "description": "ПОДСКАЗКА планировщика (локальные id): безопасно параллельно ТОЛЬКО при непересечении областей. Авторитетную проверку делает Дирижёр по scope_paths."
           },
           "dod": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Критерии готовности." },
           "priority": { "enum": ["P0", "P1", "P2"] },
-          "spec_md": { "type": "string", "description": "Тело спеки задачи (markdown, RU)." }
+          "spec_md": { "type": "string", "minLength": 1, "description": "Тело спеки задачи (markdown, RU). Frontmatter добавит Дирижёр." }
         }
       }
     },
     "waves": {
       "type": "array",
-      "description": "Группировка id по волнам: внутри волны параллельно, следующая — после зависимостей.",
-      "items": { "type": "array", "items": { "type": "string", "pattern": "^TASK-[0-9]{4}$" } }
+      "description": "Группировка локальных id по волнам: внутри волны параллельно, следующая — после зависимостей.",
+      "items": { "type": "array", "items": { "type": "string", "pattern": "^T[0-9]+$" } }
     }
   }
 }
