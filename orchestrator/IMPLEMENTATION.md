@@ -1,0 +1,214 @@
+# IMPLEMENTATION — детальный план
+
+Как именно строить оркестр. Структура: контракты агентов → контракт Дирижёра → состояние и
+схемы → стратегия интеграции/конфликтов → планирование/конкурентность → сбои и восстановление →
+риски/контроли → метрики → выбор инструментов по фазам.
+
+Контекст и схемы — [`README.md`](README.md). Фазы — [`ROADMAP.md`](ROADMAP.md).
+
+---
+
+## 1. Контракты агентов-специалистов (LLM)
+
+Каждый агент — **узкая роль**, **без состояния** (всё в `.hq`), со **структурированным выходом**
+(JSON-схема — как `schema` в Workflow / `StructuredOutput`). Запуск: Claude Code headless
+(`claude -p` с системным промптом-skill) или Agent SDK. Один вызов = одна единица работы.
+
+### 1.1 Triage (`hq-triage`)
+- **Вход:** один входящий объект (тред `comms`, идея, ответ `DEC`) + `projects/<repo>/card.md`
+  + `knowledge/ownership.md` + принцип «входящее = предложения».
+- **Промпт-суть:** «Ты отвечаешь за `<repo>`. Оцени предложение с позиции его разработчика:
+  полезно ли, в зоне ли ответственности, риск/объём. Решение и краткое обоснование.»
+- **Выход:**
+  ```json
+  {"decision":"accept|reject|clarify|escalate",
+   "rationale":"...",
+   "reply_md":"текст ответа в тред",
+   "seed":{"title":"...","repos":["..."],"priority":"P0|P1|P2","sketch":"..."}}
+  ```
+- **Эффект (пишет Дирижёр):** `reply_md` → новое сообщение в тред + `awaiting`→инициатор;
+  `accept`→seed Планировщику; `escalate`→`human/DEC`; `reject/clarify`→только ответ.
+
+### 1.2 Planner (`hq-planner`)
+- **Вход:** seed + карточки затронутых репо + `knowledge/dependency-graph.md` + текущий `QUEUE.md`.
+- **Промпт-суть:** «Разрежь на минимальные подзадачи. Для каждой укажи репо и **область**
+  (файлы/каталоги/модуль). Построй рёбра `только-после`. Помечай `parallel-safe` ТОЛЬКО при
+  непересечении областей и отсутствии общего публичного API. Сомнение → только-после.»
+- **Выход:**
+  ```json
+  {"tasks":[{"id":"TASK-####","repo":"...","scope_paths":["src/..."],
+            "depends_on":["TASK-####"],"parallel_safe_with":["TASK-####"],
+            "dod":["..."],"spec_md":"..."}],
+   "waves":[["TASK-..","TASK-.."],["TASK-.."]]}
+  ```
+- **Эффект:** спеки в `tasks/` или `projects/<repo>/tasks/`; строки + волны в `QUEUE.md`;
+  межрепо-порядок сверяется с `dependency-graph.md`.
+
+### 1.3 Executor (`hq-exec`)
+- **Вход:** спека одной подзадачи + путь к workspace + `card.md` (команды build/test) + `AGENTS.md`
+  репо (стандарты кода) + объявленная `scope_paths` (мягкая граница — выходить за неё нельзя без сигнала).
+- **Промпт-суть:** «Реализуй подзадачу в этой рабочей копии, не выходя за область. Собери,
+  прогони тесты. Если упёрся/нужны решения — верни `needs-clarification`, не выдумывай.»
+- **Выход:**
+  ```json
+  {"status":"done|failed|needs-clarification|blocked",
+   "summary":"...","files_changed":["..."],"out_of_scope_touched":[],
+   "build":"ok|fail","tests":"pass|fail|skipped","follow_ups":["..."],"questions":["..."]}
+  ```
+- **Эффект:** коммит в своей workspace (`jj describe`/commit); файл-результат
+  `tasks/_runs/<run>/<TASK>.result.json`. Дирижёр читает и решает дальше.
+
+### 1.4 Merge (`hq-merge`)
+- **Вход:** готовое изменение(я) + интеграционная ревизия + конфликты от jj (`jj status`/`jj resolve --list`).
+- **Промпт-суть:** «Разреши конфликты, сохранив намерение обеих сторон. Не глуши тесты. Если
+  разрешение неоднозначно/рисково → `needs-human`.»
+- **Выход:** `{"integrated":true|false,"conflicts_resolved":[".."],"tests":"pass|fail","needs_human":false,"notes":".."}`.
+
+### 1.5 Verifier (`hq-verify`)
+- **Вход:** интегрированное изменение (diff) + DoD задачи + стандарты репо.
+- **Делает:** переиспользует навыки `code-review` / `security-review`; проверяет покрытие DoD.
+- **Выход:** `{"verdict":"pass|fail","findings":[{"sev":"high|med|low","msg":".."}],"dod_met":true|false}`.
+- Гейт: `fail` или незакрытый DoD → задача назад в `in_progress` (пере-план) или эскалация.
+
+> Все промпты-skills версионируются в `.hq/orchestrator/agents/` (отдельная папка, добавляется в P1).
+> На входе агентам даём минимум нужного контекста (карточка, спека, diff) — не весь `.hq`.
+
+---
+
+## 2. Контракт Дирижёра (детерминированный)
+
+Обязанности: расписание тиков; скан и постановка; ready-set по графу; claim; выделение workspaces;
+запуск исполнителей с лимитом; сбор результатов; порядок интеграции; гейты; land; **единственная**
+запись `QUEUE`/статусов; лог; бюджеты/лимиты/таймауты; обработка сбоев; генерация `STATUS.md`.
+
+Псевдокод одного тика (`--dry-run` печатает, не пишет/не запускает):
+```
+tick():
+  lock(.hq/orchestrator/.lock)                  # единственный писатель
+  inbox = scan(comms[awaiting∈repos], ideas[new], human[answered])
+  for item in inbox:
+      d = agent(triage, item)                   # LLM
+      apply(d.reply, d.decision)                # пишет тред/DEC; accept → seeds += d.seed
+  for seed in seeds:
+      plan = agent(planner, seed)               # LLM
+      write_queue(plan.tasks, plan.waves)
+  ready = topo_ready(QUEUE)                      # deps==done, !blocked, !awaiting-human
+  batch = pick(ready, cap=MAX_PARALLEL, disjoint_by=scope_paths, autonomy_per_repo)
+  for t in batch: claim(t); t.ws = ws_alloc(t.repo)
+  results = parallel(batch, run=spawn_executor, supervise=processkit{timeout,limits})
+  for t in integration_order(results.ok):       # по графу
+      rebase(t.change → integ[t.repo]); 
+      if conflicts: agent(merge, ...)
+      if !tests_green(integ[t.repo]): mark(t, in_progress, reason); continue
+  for repo, integ in integ_changes:
+      v = agent(verify, integ)                  # LLM-гейт
+      if v.pass and autonomy(repo)>=auto-low and risk(integ)==low: land(repo, integ)  # main↑+push | PR
+      else: open_DEC(repo, integ, v)            # человеку
+  for t in results.{failed,needs_clarification}: handle(t)   # abandon/blocked/clarify-reply
+  mark_done(landed); archive(); write(STATUS.md); append(run_log)
+  unlock()
+```
+
+**Реализация по фазам:** P1–P5 — Дирижёр как PowerShell/bash-скрипт или Claude Code skill
+(детерминированные шаги + вызовы `claude -p`/Agent для LLM-частей). P6 — Rust-бинарь `hq-conductor`
+поверх processkit/vcs-toolkit-rs/agent-workspace.
+
+---
+
+## 3. Состояние и схемы (всё в `.hq`, в git)
+
+- **`tasks/QUEUE.md`** — уже есть: таблица + `depends-on`/`parallel-safe-with`/`status` + волны (DAG).
+- **Claim-поля** в спеке задачи: `assigned-to`, `claimed-at`, `lease-until` (TTL — если исполнитель
+  умер, лиза истекает и задача снова `ready`).
+- **`tasks/_runs/<YYYYMMDD-HHMM-tick>/`** — журнал тика: `tick.json` (что просканировано/решено/запущено),
+  `<TASK>.result.json` (выход исполнителя), `merge.json`, `verify.json`. Воспроизводимость + аудит.
+- **`orchestrator/STATUS.md`** — генерируемый дашборд: активные/ready/blocked/escalated задачи,
+  текущие workspaces, последний тик, метрики. (Человекочитаемая «приборная панель».)
+- **Локи:** `.hq/orchestrator/.lock` — один активный Дирижёр; запись `QUEUE`/статусов — только им.
+  Исполнители пишут лишь свою workspace и свой `*.result.json` (нет гонок).
+- **Идемпотентность:** статусы + `_runs` + claim позволяют после краша **переоценить** состояние из
+  файлов и worktrees и продолжить (см. §6).
+
+---
+
+## 4. Интеграция и конфликты (jj-native)
+
+Ключ ко всему — почему оркестр вообще возможен надёжно.
+
+- На репо заводится **интеграционная ревизия** `integ@<repo>` поверх текущего `main`.
+- Готовые изменения исполнителей **по одному** `jj rebase`-ятся на `integ` в порядке графа.
+- jj **не блокирует** на конфликте — конфликт становится свойством ревизии; `Merge`-агент чинит
+  его отдельным шагом (`jj resolve` / правка маркеров), сохраняя намерение обеих сторон.
+- После **каждой** интеграции — сборка/тесты. Конфликты всплывают рано и мелкими.
+- **Land** (когда гейт зелёный и автономия/политика разрешают): для прямого-в-main стиля
+  `jj bookmark move main --to integ` + `jj git push -b main` (через vcs-toolkit); иначе — PR.
+- **Откат** на любом шаге: `jj abandon integ` / `jj undo` / `jj op restore`.
+
+Преимущество перед git: в git конфликт останавливает рабочее дерево и требует немедленного
+ручного вмешательства; в jj — это данные, с которыми можно работать асинхронно отдельным агентом.
+
+---
+
+## 5. Планирование и конкурентность
+
+- **ready-set:** задача `ready`, если все `depends-on` = `done`, не `blocked`, не ждёт человека.
+- **Отбор батча:** топологически из ready, до `MAX_PARALLEL`, при условии **непересечения**
+  (между репозиториями — всегда ок; внутри репо — только при непересечении `scope_paths`).
+- **Параллельно-безопасно по умолчанию = false.** Метит Planner и только при доказуемой
+  независимости. Лучше медленнее, чем конфликтный шторм.
+- **Лимиты:** `MAX_PARALLEL` (≈ ядра−2), таймаут на исполнителя, потолок токенов/итераций на тик
+  (бюджет), потолок попыток на задачу (`retries`).
+
+---
+
+## 6. Сбои и восстановление
+
+| Сбой | Реакция |
+|---|---|
+| Исполнитель завис/превысил таймаут | processkit kill-on-drop; `jj abandon` его change; задача → `ready` (лиза истекла) или `blocked` после N попыток |
+| Исполнитель вернул `failed`/мусор | `jj abandon`; задача → `blocked` + причина; при повторе — эскалация `DEC` |
+| Конфликт неразрешим агентом | `Merge.needs_human=true` → `DEC` человеку; задача `escalated` |
+| Тесты упали после интеграции | откат `integ` (`jj undo`), задача → `in_progress` (пере-план) или `blocked` |
+| Краш Дирижёра | при старте: снять стейл-лок, прочитать `_runs`/`QUEUE`/claim+лизы, переоценить из worktrees, продолжить с безопасной точки |
+| Бюджет/итерации исчерпаны | пауза тика, отчёт в STATUS, ждать след. расписания/человека |
+
+Всё обратимо через jj/git; «приземление» — единственный «необратимый» шаг, и он за гейтом + автономией.
+
+---
+
+## 7. Риски и контроли
+
+| Риск | Контроль |
+|---|---|
+| LLM-код плохого качества | гейт тестов + Verifier (адверсариальное ревью) + DoD; диск автономии; land за человеком до P4 |
+| Конфликтные штормы (внутри-репо ∥) | кросс-репо-параллелизм сначала; `parallel-safe` консервативно; jj-инкрементальная интеграция; P5 поздно |
+| Автономный push в main ломает remote | гейт зелёных тестов; риск-классификация; `auto-low` только для низкого риска; откат; per-repo политика |
+| Гонки за состояние | единственный писатель + лок + claim/лизы; исполнители пишут только своё |
+| Зацикливание/runaway | бюджеты токенов/итераций/попыток, таймауты, стоп-кран, лимит параллелизма |
+| «Сделал, хотя должен был предложить» | принцип «входящее=предложения» в Triage; рисковое → DEC; консервативный accept |
+| Утечка секретов/личного в публичные репо | правило публичности (см. шаблоны); Verifier проверяет diff на маркеры; `.hq` локально |
+| Дрейф состояния от реальности | переоценка из worktrees при старте; `_runs`-аудит; периодическая сверка |
+
+## 8. Метрики (в STATUS.md / `_runs`)
+
+Пропускная способность (задач/тик), **% зелёных тестов** после интеграции, **% конфликтов** и
+доля авторазрешённых, **% эскалаций** к человеку, **% откатов** после land, доля автономных land,
+среднее время задачи, расход токенов/тик. Цель: повышать автономию, держа эскалации/откаты низкими.
+
+## 9. Выбор инструментов по фазам
+
+| Фаза | Дирижёр | Изоляция | Запуск/надзор | VCS | Видимость | LLM |
+|---|---|---|---|---|---|---|
+| P0–P1 | skill/скрипт | — | вручную | jj/bash | — | Claude Code skills |
+| P2 | скрипт | `ws` (1) | `claude -p` | jj/bash | лог | headless |
+| P3 | скрипт | `ws` (N) | **processkit** | jj/bash | **tessmux** | headless ×N |
+| P4 | скрипт | `ws` | processkit | **vcs-toolkit-rs** (+`vcs-mcp`) | tessmux+STATUS | + Verifier |
+| P5 | скрипт | `ws` (внутри-репо) | processkit | vcs-toolkit-rs | tessmux | + Merge |
+| P6 | **hq-conductor (Rust)** | agent-workspace API | processkit | vcs-toolkit-rs | tessmux-дашборд | headless/SDK |
+
+## 10. Первые конкретные шаги (после утверждения)
+1. P0: завести `orchestrator/agents/` + схемы `*.result.json`/`tick.json` + `STATUS.md`-шаблон +
+   поле `autonomy` в карточках + Дирижёр-скелет с `--dry-run`.
+2. P1: написать skills `hq-triage`/`hq-planner`; прогнать на `T-20260609-vcs-processkit-feedback`;
+   показать ответ-оценку + задачи в QUEUE на ревью.
+3. Завести фазы как `TASK-####` в `.hq` (P(n) только-после P(n-1)) — оркестр строит сам себя.
