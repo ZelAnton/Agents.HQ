@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hq/orchestrator/tick-log",
+  "title": "tick.json — журнал одного тика Дирижёра",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "started", "mode", "scanned", "skipped", "triaged", "planned", "errors"],
+  "properties": {
+    "run_id": { "type": "string", "description": "напр. 20260609-1530-tick или fixture-..." },
+    "started": { "type": "string", "description": "ISO-время старта тика" },
+    "mode": { "enum": ["dry-run", "live", "fixture"] },
+    "scanned": { "type": "array", "items": { "type": "string" }, "description": "id просмотренных входящих" },
+    "skipped": { "type": "array", "items": { "type": "string" }, "description": "пропущенные (напр. T-20260609)" },
+    "triaged": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item", "decision"],
+        "properties": {
+          "item": { "type": "string" },
+          "decision": { "enum": ["accept", "reject", "clarify", "escalate"] },
+          "seed_title": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "planned": { "type": "array", "items": { "type": "string" }, "description": "id заведённых TASK-####" },
+    "errors": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "string" }
+  }
+}

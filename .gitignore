@@ -2,6 +2,9 @@
 _local/
 *.local.md
 
+# Оркестратор: лок активного тика
+orchestrator/.lock
+
 # OS
 .DS_Store
 Thumbs.db

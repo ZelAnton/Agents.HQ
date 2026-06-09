@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hq/orchestrator/triage",
+  "title": "hq-triage output",
+  "description": "Структурный результат агента triage по ОДНОМУ входящему элементу.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "rationale", "reply_md", "seed"],
+  "properties": {
+    "decision": {
+      "enum": ["accept", "reject", "clarify", "escalate"],
+      "description": "accept→в план; reject→вежливый отказ; clarify→уточняющий вопрос; escalate→решение человеку (DEC)"
+    },
+    "rationale": {
+      "type": "string",
+      "description": "Кратко: почему такое решение, с позиции владельца репозитория-адресата."
+    },
+    "reply_md": {
+      "type": "string",
+      "description": "Готовый текст ответа в тред (русский), markdown."
+    },
+    "seed": {
+      "type": ["object", "null"],
+      "description": "Заготовка задачи. Обязателен при decision=accept, иначе null.",
+      "additionalProperties": false,
+      "required": ["title", "repos", "priority", "sketch"],
+      "properties": {
+        "title": { "type": "string" },
+        "repos": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "priority": { "enum": ["P0", "P1", "P2"] },
+        "sketch": { "type": "string", "description": "Грубое описание объёма для planner." }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "decision": { "const": "accept" } } },
+      "then": { "properties": { "seed": { "type": "object" } } },
+      "else": { "properties": { "seed": { "type": "null" } } }
+    }
+  ]
+}

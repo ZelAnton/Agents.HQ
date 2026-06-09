@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hq/orchestrator/executor-result",
+  "title": "hq-exec output (заглушка для P2)",
+  "description": "Результат исполнителя одной подзадачи. Используется начиная с фазы P2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary"],
+  "properties": {
+    "status": { "enum": ["done", "failed", "needs-clarification", "blocked"] },
+    "summary": { "type": "string" },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "out_of_scope_touched": { "type": "array", "items": { "type": "string" }, "description": "файлы вне scope_paths (должно быть пусто)" },
+    "build": { "enum": ["ok", "fail", "skipped"] },
+    "tests": { "enum": ["pass", "fail", "skipped"] },
+    "follow_ups": { "type": "array", "items": { "type": "string" } },
+    "questions": { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -4,6 +4,7 @@ type: card
 kind: library           # library | cli | tui | tooling | marketplace
 language: Rust          # Rust | C#/.NET | mixed | ...
 status: active          # active | maintenance | experimental | no-repo-yet
+autonomy: propose       # оркестр: propose | assist | auto-low (отсутствует ⇒ propose)
 publishes: []           # crates.io: ... / NuGet: ... / PyPI: ... / нет
 depends-on: []          # репо из этого пространства
 depended-on-by: []
