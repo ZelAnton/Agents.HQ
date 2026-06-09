@@ -1,0 +1,8 @@
+# Локальные черновики — не версионируются
+_local/
+*.local.md
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
