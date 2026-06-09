@@ -31,13 +31,13 @@
 |----|------|-------|--------|------------|-------|
 | TASK-0011 | P0 фундамент | orchestrator | **done** | — | `../orchestrator/tasks/TASK-0011-p0-foundations.md` |
 | TASK-0012 | P1 триаж+план | orchestrator | **done** | TASK-0011 | `../orchestrator/tasks/TASK-0012-p1-triage-planner.md` |
-| TASK-0013 | P2 1 задача в изоляции | orchestrator | **ready** | TASK-0012 | `../orchestrator/tasks/TASK-0013-p2-single-execution.md` |
-| TASK-0014 | P3 кросс-репо ∥ | orchestrator | queued | TASK-0013 | `../orchestrator/tasks/TASK-0014-p3-cross-repo-parallel.md` |
+| TASK-0013 | P2 1 задача в изоляции | orchestrator | **done** | TASK-0012 | `../orchestrator/tasks/TASK-0013-p2-single-execution.md` |
+| TASK-0014 | P3 кросс-репо ∥ | orchestrator | **ready** | TASK-0013 | `../orchestrator/tasks/TASK-0014-p3-cross-repo-parallel.md` |
 | TASK-0015 | P4 jj-интеграция + авто-land | orchestrator | queued | TASK-0014 | `../orchestrator/tasks/TASK-0015-p4-jj-integration-autoland.md` |
 | TASK-0016 | P5 внутри-репо ∥ | orchestrator | queued | TASK-0015 | `../orchestrator/tasks/TASK-0016-p5-intra-repo-parallel.md` |
 | TASK-0017 | P6 hardening/scale | orchestrator | queued | TASK-0016 | `../orchestrator/tasks/TASK-0017-p6-hardening-scale.md` |
 
-Следующая готовая: **TASK-0013 (P2)** — зависимость (P1) выполнена.
+Следующая готовая: **TASK-0014 (P3)** — зависимость (P2) выполнена.
 *(Номера 0005–0010 использованы примером валидационной фикстуры в `../orchestrator/_runs/` и в очередь НЕ входят.)*
 
 ## Правила (кратко)
