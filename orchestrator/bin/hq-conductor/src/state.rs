@@ -52,22 +52,6 @@ impl Paths {
     }
 }
 
-/// Список run-директорий (последние `window`, в хронологическом порядке по имени).
-pub fn list_run_dirs(runs: &Path, window: usize) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(runs)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-    if dirs.len() > window {
-        dirs = dirs[dirs.len() - window..].to_vec();
-    }
-    dirs
-}
-
 /// Рекурсивный обход файлов в директории.
 pub fn walk_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

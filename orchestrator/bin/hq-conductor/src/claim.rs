@@ -1,5 +1,5 @@
 use crate::fm::{fm_get, fm_remove, fm_set, parse_fm, render_fm};
-use crate::state::{current_hostname, is_pid_alive};
+use crate::state::{current_hostname, owner_reclaimable};
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
 
@@ -66,40 +66,23 @@ pub fn run(_hq: PathBuf, args: ClaimArgs) -> Result<(), Box<dyn std::error::Erro
                 return Ok(());
             }
 
-            // Есть claim — проверяем lease expiry
-            let lease_expired = fm_get(&pairs, "lease-until")
-                .as_deref()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|t| chrono::Utc::now() > t.to_utc())
-                .unwrap_or(true); // нет поля → считаем истёкшим
-
-            if !lease_expired {
-                eprintln!(
-                    "claimed: assigned-to={assigned}, lease active until {}",
-                    fm_get(&pairs, "lease-until").unwrap_or_default()
-                );
-                std::process::exit(1);
-            }
-
-            // Lease истёк → проверяем, мёртв ли owner PID (только на том же хосте)
+            // ЕДИНЫЙ источник правды с тиком (dispatch::task_is_free) — owner_reclaimable.
+            // Раньше здесь была отдельная (более строгая) логика, расходившаяся с tick:
+            // claim check мог вечно держать «claimed» задачу, которую tick уже забрал по
+            // force-grace (переиспользование PID / другой хост / истёкший lease без PID).
             let owner_host = fm_get(&pairs, "owner-host").unwrap_or_default();
             let owner_pid: Option<u32> = fm_get(&pairs, "owner-pid").and_then(|s| s.parse().ok());
-            let same_host = owner_host.eq_ignore_ascii_case(&current_hostname());
+            let lease_until = fm_get(&pairs, "lease-until")
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.to_utc());
 
-            let pid_confirmed_dead = if same_host {
-                owner_pid.map(|p| !is_pid_alive(p)).unwrap_or(false)
+            if owner_reclaimable(&owner_host, owner_pid, lease_until) {
+                println!("free (owner gone / lease forfeited)");
             } else {
-                false // другой хост → не можем проверить
-            };
-
-            if lease_expired && pid_confirmed_dead {
-                println!("free (lease expired, owner confirmed dead)");
-                return Ok(());
-            } else {
-                // fail-closed: не можем подтвердить смерть → эскалация (§11.5)
                 eprintln!(
-                    "claimed: assigned-to={assigned}, lease_expired={lease_expired} \
-                     pid_confirmed_dead={pid_confirmed_dead} same_host={same_host} (fail-closed)"
+                    "claimed: assigned-to={assigned}, lease until {} (owner alive / в grace)",
+                    fm_get(&pairs, "lease-until").unwrap_or_else(|| "—".to_owned())
                 );
                 std::process::exit(1);
             }

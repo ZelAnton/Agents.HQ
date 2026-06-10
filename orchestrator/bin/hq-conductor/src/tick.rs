@@ -193,9 +193,49 @@ fn revert_stale_in_progress(
             &[("status", "ready"), ("assigned-to", "null")],
             CLAIM_FIELDS,
         )?;
+        // Зеркалим очистку claim в памяти: иначе последующий select_for_dispatch снова
+        // гоняет owner_reclaimable (лишний tasklist) по устаревшим полям, и есть узкое окно,
+        // где переиспользованный PID сделает только что освобождённую задачу «занятой».
         task.status = "ready".to_owned();
+        task.assigned_to = None;
+        task.lease_until = None;
+        task.owner_pid = None;
+        task.owner_host.clear();
         journal::mark_mutation_applied(run_dir, &mid)?;
         println!("  recovery: {} in-progress → ready (stale claim)", task.id);
+    }
+    Ok(())
+}
+
+/// Release stale claims on dispatch-target tasks (`intake`/`ready`/`in-review`) — status
+/// unchanged. Эти статусы — цели select_for_dispatch и обычно само-восстанавливаются (claim
+/// перезапишется при ре-диспатче, т.к. task_is_free видит мёртвого владельца). Но если слот
+/// роли занят в этом тике, протухший claim повисает; чистим его явно, чтобы recovery была
+/// полной и единообразной (в отличие от `in-progress`, который НЕ цель диспатча и требует
+/// явного revert→ready). Fail-closed сохраняется: освобождаем только то, что task_is_free
+/// считает свободным (мёртвый PID / после force-grace).
+fn release_stale_dispatch_claims(
+    tasks: &mut [TaskInfo],
+    run_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for task in tasks.iter_mut() {
+        if !matches!(task.status.as_str(), "intake" | "ready" | "in-review") {
+            continue;
+        }
+        if task.assigned_to.is_none() {
+            continue; // claim нет
+        }
+        if !dispatch::task_is_free(task) {
+            continue; // claim ещё живой → не трогаем (fail-closed)
+        }
+        let mid = journal::record_mutation(run_dir, "recovery-release-claim", &task.id, None)?;
+        write_task_fm(&task.path, &[("assigned-to", "null")], CLAIM_FIELDS)?;
+        task.assigned_to = None;
+        task.lease_until = None;
+        task.owner_pid = None;
+        task.owner_host.clear();
+        journal::mark_mutation_applied(run_dir, &mid)?;
+        println!("  recovery: {} — released stale claim ({})", task.id, task.status);
     }
     Ok(())
 }
@@ -242,6 +282,23 @@ fn promote_queued_to_ready(
     tasks: &mut [TaskInfo],
     run_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Surface «висячие» зависимости: dep-id, которого нет ни в одной задаче (опечатка/удалён).
+    // Иначе `task_deps_done` навсегда false → задача молча застревает в queued без сигнала.
+    for t in tasks.iter().filter(|t| t.status == "queued") {
+        let missing: Vec<&str> = t
+            .depends_on
+            .iter()
+            .filter(|d| !tasks.iter().any(|x| &x.id == *d))
+            .map(|s| s.as_str())
+            .collect();
+        if !missing.is_empty() {
+            eprintln!(
+                "tick: задача {} зависит от несуществующих {:?} — останется в queued",
+                t.id, missing
+            );
+        }
+    }
+
     // Collect indices first to avoid double-borrow (both borrows are shared, but collect avoids
     // holding iterator + mutable ref simultaneously in the loop below)
     let to_promote: Vec<usize> = (0..tasks.len())
@@ -525,6 +582,7 @@ pub fn run(hq: PathBuf, args: TickArgs) -> Result<(), Box<dyn std::error::Error>
 
     // 5. Recovery
     revert_stale_in_progress(&mut tasks, &run_dir)?;
+    release_stale_dispatch_claims(&mut tasks, &run_dir)?;
     requeue_fix_needed(&mut tasks, &run_dir)?;
 
     // 6. Promote queued → ready

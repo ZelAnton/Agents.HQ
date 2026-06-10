@@ -75,6 +75,10 @@ fn scan_dir(dir: &Path, out: &mut Vec<TaskInfo>) {
 }
 
 /// Scan all task dirs: `hq/tasks/`, `hq/orchestrator/tasks/`, `hq/projects/*/tasks/`.
+/// Дедуплицирует по `id`: один логический `TASK-####` не должен попасть в диспетчер дважды
+/// (иначе двойной спавн + недетерминированное разрешение зависимостей, т.к. `task_deps_done`
+/// берёт первое совпадение). Оставляем ПЕРВЫЙ в порядке сканирования (hq → orch → projects),
+/// о коллизии предупреждаем.
 pub fn scan_all_tasks(paths: &Paths) -> Vec<TaskInfo> {
     let mut tasks = Vec::new();
     scan_dir(&paths.tasks, &mut tasks);
@@ -87,7 +91,21 @@ pub fn scan_all_tasks(paths: &Paths) -> Vec<TaskInfo> {
             }
         }
     }
-    tasks
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut deduped = Vec::with_capacity(tasks.len());
+    for t in tasks {
+        if seen.insert(t.id.clone()) {
+            deduped.push(t);
+        } else {
+            eprintln!(
+                "scan: ПРЕДУПРЕЖДЕНИЕ — дубликат id {} в {} (пропущен; используется первый)",
+                t.id,
+                t.path.display()
+            );
+        }
+    }
+    deduped
 }
 
 // ---------- Claim helpers ----------

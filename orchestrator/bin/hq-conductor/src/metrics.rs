@@ -2,6 +2,7 @@ use crate::state::{self, Paths};
 use clap::Args;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Args)]
 pub struct MetricsArgs {
@@ -154,8 +155,35 @@ fn collect_run(dir: &Path) -> Option<RunStats> {
 /// Вычисляет §11.8 метрики по `window` последних прогонов.
 pub fn compute(hq: &Path, window: usize) -> Metrics {
     let paths = Paths::new(hq.to_path_buf());
-    let run_dirs = state::list_run_dirs(&paths.runs, window);
-    let stats: Vec<RunStats> = run_dirs.iter().filter_map(|d| collect_run(d)).collect();
+    // Свежие прогоны — первыми (по mtime каталога), набираем RunStats пока не наберём `window`
+    // data-bearing прогонов. Журнальные tick-каталоги (`_runs/TICK-*`, только tick.json, без
+    // summary/land) дают None и пропускаются — не вытесняют реальные exec/land-прогоны из окна.
+    // Порядок по ВРЕМЕНИ, а не по имени, — устойчив к схеме именования (TICK-* vs tick5-* и т.п.).
+    // SCAN_CAP ограничивает IO даже при разросшейся истории `_runs/` (ретеншн — отдельно, M4+).
+    const SCAN_CAP: usize = 500;
+    let mut dirs: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(&paths.runs)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .map(|p| {
+            let mt = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .unwrap_or(UNIX_EPOCH);
+            (p, mt)
+        })
+        .collect();
+    dirs.sort_by(|a, b| b.1.cmp(&a.1)); // по убыванию: свежие первыми
+    let mut stats: Vec<RunStats> = Vec::new();
+    for (p, _) in dirs.into_iter().take(SCAN_CAP) {
+        if let Some(s) = collect_run(&p) {
+            stats.push(s);
+            if stats.len() >= window {
+                break;
+            }
+        }
+    }
 
     let total = stats.len();
     if total == 0 {
