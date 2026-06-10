@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hq/orchestrator/verify",
+  "title": "hq-verify output",
+  "description": "Результат Верификатора: состязательное ревью интегрированного diff против DoD и стандартов репо. Используется начиная с фазы P4 (вход контура auto-land).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "dod_met", "findings"],
+  "properties": {
+    "verdict": {
+      "enum": ["pass", "fail"],
+      "description": "pass ⇔ изменение реализует DoD, не выходит за объём, не вносит дефектов/рисков. Любое сомнение ⇒ fail (fail-closed, §11.1)."
+    },
+    "dod_met": {
+      "type": "boolean",
+      "description": "Все пункты DoD задачи фактически покрыты этим diff (проверено по содержимому, не по словам исполнителя)."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Замечания ревью. Пусто ⇒ нет претензий. Любой sev=high ОБЯЗАН давать verdict=fail.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sev", "msg"],
+        "properties": {
+          "sev": { "enum": ["high", "med", "low"] },
+          "msg": { "type": "string", "minLength": 3, "description": "Суть замечания (RU): что не так и где (файл/строка, если ясно)." }
+        }
+      }
+    },
+    "out_of_scope": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Пути, изменённые вне объявленного scope_paths задачи (с точки зрения ревьюера diff). Непусто ⇒ hard-stop для auto-land (§11.6)."
+    },
+    "both_sides_present": {
+      "type": ["boolean", "null"],
+      "description": "Только для интеграции с разрешёнными конфликтами (§11.2): подтверждено ли намерение ОБЕИХ сторон. null ⇒ конфликтов не было."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Короткий RU-вывод: почему pass/fail."
+    }
+  }
+}

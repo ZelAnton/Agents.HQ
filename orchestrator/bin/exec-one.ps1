@@ -48,6 +48,7 @@ function Invoke-Claude {
 }
 
 New-Item -ItemType Directory -Force $RunDir | Out-Null
+$RunDir = (Resolve-Path $RunDir).Path   # абсолютный: дальше пишем после Push-Location $dest
 $taskText = Get-Content -Raw $Task
 $repo = Fm1 $taskText 'repo'; if (-not $repo) { $repo = Fm1 $taskText 'scope' }
 if (-not $repo) { throw "в задаче нет repo/scope" }
