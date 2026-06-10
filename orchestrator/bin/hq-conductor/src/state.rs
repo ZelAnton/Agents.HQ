@@ -28,6 +28,12 @@ pub struct Paths {
     pub tasks: PathBuf,
     /// `orchestrator/automation.json` — pause / policy overrides
     pub automation_json: PathBuf,
+    /// `orchestrator/bin` — worker scripts (exec-one.ps1, plan-one.ps1, …)
+    pub bin: PathBuf,
+    /// `human/decisions` — DEC files for escalations
+    pub decisions: PathBuf,
+    /// `human/INBOX.md`
+    pub inbox: PathBuf,
 }
 
 impl Paths {
@@ -43,7 +49,10 @@ impl Paths {
         let sessions_archive = orch.join("sessions").join("_archive");
         let tasks = hq.join("tasks");
         let automation_json = orch.join("automation.json");
-        Self { hq, orch, runs, lock, lock5, status, status_template, schemas, sessions_active, sessions_archive, tasks, automation_json }
+        let bin = orch.join("bin");
+        let decisions = hq.join("human").join("decisions");
+        let inbox = hq.join("human").join("INBOX.md");
+        Self { hq, orch, runs, lock, lock5, status, status_template, schemas, sessions_active, sessions_archive, tasks, automation_json, bin, decisions, inbox }
     }
 
     /// Родительская директория .hq (Personal/).

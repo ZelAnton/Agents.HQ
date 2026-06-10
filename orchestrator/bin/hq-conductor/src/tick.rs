@@ -22,6 +22,7 @@ use crate::journal;
 use crate::metrics;
 use crate::session;
 use crate::state::{current_hostname, LockInfo, Paths};
+use crate::worker::{self, Job};
 use clap::{Args, ValueEnum};
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -45,6 +46,24 @@ pub struct TickArgs {
     /// Maximum tasks per repo in-flight per role
     #[arg(long, default_value_t = 2)]
     pub max_per_repo: usize,
+    /// Каталог worker-скриптов (по умолчанию orchestrator/bin). Переопределяется для stub-тестов.
+    #[arg(long)]
+    pub bin_dir: Option<PathBuf>,
+    /// Путь к hq-spawn.exe (по умолчанию orchestrator/bin/hq-spawn/target/release/hq-spawn.exe).
+    #[arg(long)]
+    pub spawn_bin: Option<PathBuf>,
+    /// Модель планировщика/ревьюера (сильная).
+    #[arg(long, default_value = "opus")]
+    pub strong_model: String,
+    /// Модель исполнителя (дешёвая).
+    #[arg(long, default_value = "sonnet")]
+    pub exec_model: String,
+    /// Порог объёма diff (строк) для risk=low.
+    #[arg(long, default_value_t = 200)]
+    pub size_limit: u64,
+    /// Таймаут одного воркера (сек).
+    #[arg(long, default_value_t = 900)]
+    pub worker_timeout_sec: u64,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -461,6 +480,356 @@ fn mock_review(
     Ok(())
 }
 
+// ---------- M3: live worker dispatch ----------
+
+fn resolve_bin_dir(paths: &Paths, args: &TickArgs) -> PathBuf {
+    args.bin_dir.clone().unwrap_or_else(|| paths.bin.clone())
+}
+
+fn resolve_spawn_bin(paths: &Paths, args: &TickArgs) -> PathBuf {
+    args.spawn_bin.clone().unwrap_or_else(|| {
+        paths.bin.join("hq-spawn").join("target").join("release").join("hq-spawn.exe")
+    })
+}
+
+fn pwsh_job(id: String, script: &Path, extra: &[String], timeout_sec: u64) -> Job {
+    let mut args = vec![
+        "-NoProfile".to_owned(),
+        "-File".to_owned(),
+        script.display().to_string(),
+    ];
+    args.extend_from_slice(extra);
+    Job { id, program: "pwsh".to_owned(), args, timeout_sec }
+}
+
+/// Read a single frontmatter field straight from a task file on disk.
+fn read_task_field(path: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let (pairs, _) = parse_fm(&content);
+    fm_get(&pairs, key).filter(|v| v != "null" && !v.is_empty())
+}
+
+/// PLAN phase: intake → queued | rejected | escalated (via plan-one.ps1).
+fn run_plan_phase(
+    paths: &Paths,
+    bin: &Path,
+    spawn_bin: &Path,
+    args: &TickArgs,
+    run_dir: &Path,
+    candidates: &[TaskInfo],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let script = bin.join("plan-one.ps1");
+    let mut jobs = Vec::new();
+    let mut meta = Vec::new();
+    for task in candidates {
+        let per = run_dir.join(format!("plan-{}", task.id));
+        let jid = journal::record_mutation(run_dir, "plan-spawn", &task.id, None)?;
+        apply_set(&task.path, &make_claim("hq-planner", PLAN_LEASE_SEC))?;
+        let sess = session::session_new(
+            paths, &task.id, "plan", &args.strong_model, &task.scope,
+            &per.to_string_lossy(), None, None, PLAN_LEASE_SEC as u64,
+        )?;
+        jobs.push(pwsh_job(
+            format!("plan-{}", task.id),
+            &script,
+            &[
+                "-Task".to_owned(), task.path.display().to_string(),
+                "-RunDir".to_owned(), per.display().to_string(),
+                "-Model".to_owned(), args.strong_model.clone(),
+            ],
+            args.worker_timeout_sec,
+        ));
+        meta.push((task, sess, per, jid));
+    }
+    let batch = worker::run_batch(spawn_bin, &jobs, args.max_plan, &run_dir.join("plan-batch"))?;
+    worker::log_failed_jobs(&batch, "plan");
+    let mut count = 0;
+    for (task, sess, per, jid) in meta {
+        let res = worker::read_plan_result(&per);
+        let decision = res.as_ref().map(|r| r.decision.as_str()).unwrap_or("");
+        let reason = res.as_ref().map(|r| r.reason.clone()).unwrap_or_default();
+        let (status, note) = match decision {
+            "accept" => ("queued", "plan: accepted → queued"),
+            "reject" => ("rejected", "plan: rejected"),
+            "escalate" => ("escalated", "plan: escalated to human"),
+            _ => ("intake", "plan: no result — оставляем intake (retry)"),
+        };
+        if status == "intake" {
+            // worker failed/produced nothing → release claim, stay intake for next tick
+            write_task_fm(&task.path, &[("assigned-to", "null")], CLAIM_FIELDS)?;
+            session::session_end(paths, &sess, "failed", Some(note))?;
+            eprintln!("  plan: {} — нет результата, оставлено intake", task.id);
+        } else {
+            write_task_fm(&task.path, &[("status", status), ("assigned-to", "null")], CLAIM_FIELDS)?;
+            session::session_end(paths, &sess, "done", Some(note))?;
+            let why = if reason.is_empty() { String::new() } else { format!(" ({reason})") };
+            println!("  plan: {} → {status}{why}", task.id);
+            count += 1;
+        }
+        journal::mark_mutation_applied(run_dir, &jid)?;
+    }
+    Ok(count)
+}
+
+/// EXEC phase: ready → in-progress → in-review | blocked (via exec-one.ps1).
+fn run_exec_phase(
+    paths: &Paths,
+    bin: &Path,
+    spawn_bin: &Path,
+    args: &TickArgs,
+    run_dir: &Path,
+    candidates: &[TaskInfo],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let script = bin.join("exec-one.ps1");
+    let mut jobs = Vec::new();
+    let mut meta = Vec::new();
+    for task in candidates {
+        let per = run_dir.join(format!("exec-{}", task.id));
+        let jid = journal::record_mutation(run_dir, "exec-spawn", &task.id, None)?;
+        let mut claim = make_claim("hq-exec", EXEC_LEASE_SEC);
+        claim.push(("status".to_owned(), "in-progress".to_owned()));
+        apply_set(&task.path, &claim)?;
+        let sess = session::session_new(
+            paths, &task.id, "exec", &args.exec_model, &task.scope,
+            &per.to_string_lossy(), None, None, EXEC_LEASE_SEC as u64,
+        )?;
+        jobs.push(pwsh_job(
+            format!("exec-{}", task.id),
+            &script,
+            &[
+                "-Task".to_owned(), task.path.display().to_string(),
+                "-RunDir".to_owned(), per.display().to_string(),
+                "-Model".to_owned(), args.exec_model.clone(),
+            ],
+            args.worker_timeout_sec,
+        ));
+        meta.push((task, sess, per, jid));
+    }
+    let batch = worker::run_batch(spawn_bin, &jobs, args.max_exec, &run_dir.join("exec-batch"))?;
+    worker::log_failed_jobs(&batch, "exec");
+    let mut count = 0;
+    for (task, sess, per, jid) in meta {
+        let summary = worker::read_exec_summary(&per);
+        let ok = summary.as_ref().map(|s| {
+            s.gate_build && s.gate_tests && s.out_of_scope.is_empty() && s.leaks.is_empty()
+                && s.executor_status.as_deref() == Some("done")
+        }).unwrap_or(false);
+        if ok {
+            let ws = summary.as_ref().map(|s| s.workspace.clone()).unwrap_or_default();
+            write_task_fm(
+                &task.path,
+                &[("status", "in-review"), ("assigned-to", "null"),
+                  ("run-dir", &per.to_string_lossy()), ("session", &sess)],
+                CLAIM_FIELDS,
+            )?;
+            session::session_end(paths, &sess, "done", Some("exec ok → in-review"))?;
+            println!("  exec: {} → in-review (ws={ws})", task.id);
+            count += 1;
+        } else {
+            let reason = summary.as_ref().and_then(|s| s.exec_error.clone())
+                .unwrap_or_else(|| "exec gate не зелёный / status≠done".to_owned());
+            write_task_fm(
+                &task.path,
+                &[("status", "blocked"), ("assigned-to", "null"), ("blocked-reason", &reason)],
+                CLAIM_FIELDS,
+            )?;
+            session::session_end(paths, &sess, "failed", Some(&format!("exec failed: {reason}")))?;
+            println!("  exec: {} → blocked ({reason})", task.id);
+        }
+        journal::mark_mutation_applied(run_dir, &jid)?;
+    }
+    Ok(count)
+}
+
+/// REVIEW phase: in-review → done | fix-needed | escalated.
+/// Spawns verify-one.ps1 (hq-verify + workspace facts), then Rust assesses risk and routes.
+fn run_review_phase(
+    paths: &Paths,
+    bin: &Path,
+    spawn_bin: &Path,
+    args: &TickArgs,
+    run_dir: &Path,
+    candidates: &[TaskInfo],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let script = bin.join("verify-one.ps1");
+    let mut jobs = Vec::new();
+    let mut meta = Vec::new();
+    for task in candidates {
+        // Where exec left the workspace/result — required to verify.
+        let exec_run = read_task_field(&task.path, "run-dir");
+        let per = run_dir.join(format!("review-{}", task.id));
+        let jid = journal::record_mutation(run_dir, "review-spawn", &task.id, None)?;
+        apply_set(&task.path, &make_claim("hq-verify", REVIEW_LEASE_SEC))?;
+        let sess = session::session_new(
+            paths, &task.id, "review", &args.strong_model, &task.scope,
+            &per.to_string_lossy(), None, None, REVIEW_LEASE_SEC as u64,
+        )?;
+        let exec_run_arg = exec_run.clone().unwrap_or_default();
+        jobs.push(pwsh_job(
+            format!("review-{}", task.id),
+            &script,
+            &[
+                "-Task".to_owned(), task.path.display().to_string(),
+                "-ExecRunDir".to_owned(), exec_run_arg,
+                "-RunDir".to_owned(), per.display().to_string(),
+                "-Model".to_owned(), args.strong_model.clone(),
+            ],
+            args.worker_timeout_sec,
+        ));
+        meta.push((task, sess, per, jid, exec_run));
+    }
+    let batch = worker::run_batch(spawn_bin, &jobs, args.max_review, &run_dir.join("review-batch"))?;
+    worker::log_failed_jobs(&batch, "review");
+    let mut count = 0;
+    for (task, sess, per, jid, exec_run) in meta {
+        let verify = worker::read_verify(&per);
+        if let Some(v) = &verify {
+            if !v.summary.is_empty() {
+                println!("  review[{}]: verify={} — {}", task.id, v.verdict, v.summary);
+            }
+        }
+        let ctx = worker::read_review_context(&per).unwrap_or_default();
+        let summary = exec_run.as_deref().and_then(|r| worker::read_exec_summary(Path::new(r)));
+
+        let outcome = decide_review(paths, args, task, verify.as_ref(), &ctx, summary.as_ref(), bin, spawn_bin)?;
+        match outcome {
+            ReviewOutcome::Done => {
+                write_task_fm(&task.path, &[("status", "done"), ("assigned-to", "null"),
+                    ("review", "pass"), ("risk", "low")], CLAIM_FIELDS)?;
+                session::session_end(paths, &sess, "done", Some("review pass + low → landed → done"))?;
+                println!("  review: {} → done (auto-landed)", task.id);
+            }
+            ReviewOutcome::FixNeeded => {
+                write_task_fm(&task.path, &[("status", "fix-needed"), ("assigned-to", "null")], CLAIM_FIELDS)?;
+                session::session_end(paths, &sess, "done", Some("review fail → fix-needed"))?;
+                println!("  review: {} → fix-needed (verify fail)", task.id);
+            }
+            ReviewOutcome::Escalated(dec) => {
+                write_task_fm(&task.path, &[("status", "escalated"), ("assigned-to", "null"),
+                    ("review", "escalated"), ("blocked-reason", &dec)], CLAIM_FIELDS)?;
+                session::session_end(paths, &sess, "done", Some(&format!("review → escalated ({dec})")))?;
+                println!("  review: {} → escalated ({dec})", task.id);
+            }
+        }
+        journal::mark_mutation_applied(run_dir, &jid)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+enum ReviewOutcome {
+    Done,
+    FixNeeded,
+    Escalated(String), // DEC id or reason
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decide_review(
+    paths: &Paths,
+    args: &TickArgs,
+    task: &TaskInfo,
+    verify: Option<&worker::VerifyResult>,
+    ctx: &worker::ReviewContext,
+    summary: Option<&worker::ExecSummary>,
+    bin: &Path,
+    spawn_bin: &Path,
+) -> Result<ReviewOutcome, Box<dyn std::error::Error>> {
+    // Fixable verify failure → fix-needed (the bounded escalation lives in requeue_fix_needed).
+    if worker::verify_is_fixable(verify) {
+        return Ok(ReviewOutcome::FixNeeded);
+    }
+    // verify missing entirely (worker error) → escalate, не теряем задачу
+    let Some(summary) = summary else {
+        return Ok(ReviewOutcome::Escalated("нет exec-summary для review".to_owned()));
+    };
+    let risk = worker::assess_risk(summary, verify, ctx, args.size_limit);
+    if risk.low {
+        // auto-land via land-only.ps1 (jj bookmark move + push). On failure → escalate.
+        let landed = run_land_only(bin, spawn_bin, args, &summary.repo, &ctx.change)?;
+        if landed {
+            return Ok(ReviewOutcome::Done);
+        }
+        return Ok(ReviewOutcome::Escalated("land-only не удался".to_owned()));
+    }
+    // pass but not-low → DEC for human
+    let now_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let findings = verify.map(|v| v.findings.clone()).unwrap_or_default();
+    let dec = worker::write_land_dec(
+        &paths.decisions, &paths.inbox, &task.id, &summary.repo, &summary.workspace,
+        &summary.dest, &ctx.change, "origin", "not-low", &risk.reasons, &findings, &now_date,
+    )?;
+    println!("  review[{}]: DEC {} → {}", task.id, dec.id, dec.file.display());
+    Ok(ReviewOutcome::Escalated(dec.id))
+}
+
+/// Run land-only.ps1 (jj bookmark move main → change; jj git push). Returns true on success.
+fn run_land_only(
+    bin: &Path,
+    spawn_bin: &Path,
+    args: &TickArgs,
+    repo: &str,
+    change: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let script = bin.join("land-only.ps1");
+    let job = pwsh_job(
+        format!("land-{repo}-{change}"),
+        &script,
+        &[
+            "-Repo".to_owned(), repo.to_owned(),
+            "-Change".to_owned(), change.to_owned(),
+            "-Remote".to_owned(), "origin".to_owned(),
+        ],
+        args.worker_timeout_sec,
+    );
+    let tmp = std::env::temp_dir().join(format!("hq-land-{}-{}", std::process::id(), change));
+    let results = worker::run_batch(spawn_bin, std::slice::from_ref(&job), 1, &tmp)?;
+    let ok = results.first().map(|r| r.success).unwrap_or(false);
+    Ok(ok)
+}
+
+/// Live dispatch entry — assist (dry plan) or auto-low (real workers).
+fn live_dispatch(
+    paths: &Paths,
+    args: &TickArgs,
+    tasks: &[TaskInfo],
+    run_dir: &Path,
+    plan_slots: usize,
+    exec_slots: usize,
+    review_slots: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bin = resolve_bin_dir(paths, args);
+    let spawn_bin = resolve_spawn_bin(paths, args);
+
+    let plan_c: Vec<TaskInfo> = dispatch::select_for_dispatch(tasks, "intake", plan_slots, args.max_per_repo)
+        .into_iter().cloned().collect();
+    let exec_c: Vec<TaskInfo> = dispatch::select_for_dispatch(tasks, "ready", exec_slots, args.max_per_repo)
+        .into_iter().filter(|t| dispatch::task_deps_done(t, tasks)).cloned().collect();
+    let review_c: Vec<TaskInfo> = dispatch::select_for_dispatch(tasks, "in-review", review_slots, args.max_per_repo)
+        .into_iter().cloned().collect();
+
+    if matches!(args.mode, TickMode::Assist) {
+        let ids = |v: &[TaskInfo]| v.iter().map(|t| t.id.clone()).collect::<Vec<_>>().join(", ");
+        println!("assist (dry): would plan [{}] · exec [{}] · review [{}]",
+            ids(&plan_c), ids(&exec_c), ids(&review_c));
+        return Ok(());
+    }
+
+    let planned = run_plan_phase(paths, &bin, &spawn_bin, args, run_dir, &plan_c)?;
+    let execed = run_exec_phase(paths, &bin, &spawn_bin, args, run_dir, &exec_c)?;
+    let reviewed = run_review_phase(paths, &bin, &spawn_bin, args, run_dir, &review_c)?;
+    println!("tick done (live): planned={planned} exec={execed} reviewed={reviewed}");
+    Ok(())
+}
+
 // ---------- STATUS.md update ----------
 
 fn render_sessions_section(sessions: &[session::SessionEntry]) -> String {
@@ -645,12 +1014,7 @@ pub fn run(hq: PathBuf, args: TickArgs) -> Result<(), Box<dyn std::error::Error>
             println!("tick done: planned={planned} exec={execed} reviewed={reviewed}");
         }
         TickMode::Assist | TickMode::AutoLow => {
-            println!("tick: mode={mode_str} — live agents not implemented yet (M3)");
-            println!("  intake={} ready={} in-review={}",
-                tasks.iter().filter(|t| t.status == "intake").count(),
-                tasks.iter().filter(|t| t.status == "ready").count(),
-                tasks.iter().filter(|t| t.status == "in-review").count(),
-            );
+            live_dispatch(&paths, &args, &tasks, &run_dir, plan_slots, exec_slots, review_slots)?;
         }
     }
 

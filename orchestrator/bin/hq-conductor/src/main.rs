@@ -7,6 +7,7 @@ mod metrics;
 mod session;
 mod state;
 mod tick;
+mod worker;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
