@@ -1,4 +1,4 @@
----
+﻿---
 id: TASK-0004
 type: task
 title: Миграция workflow push-to-main → PR во всех репо
@@ -11,6 +11,8 @@ depends-on: []
 parallel-safe-with: [TASK-0001, TASK-0002, TASK-0003]
 assigned-to: null
 origin: migration (root rewrite-push-to-main-to-pr-workflow.md)
+session: null
+risk: null
 ---
 
 ## Цель

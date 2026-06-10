@@ -62,8 +62,7 @@ fn session_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.md"))
 }
 
-fn write_atomic(path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Уникальный tmp по PID: два писателя (heartbeat/gc/два тика) не делят один tmp-файл (гонка).
+pub(crate) fn write_atomic(path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)?;
@@ -86,8 +85,10 @@ fn find_session(paths: &Paths, id: &str) -> Option<PathBuf> {
     None
 }
 
+pub type SessionEntry = (String, PathBuf, Vec<(String, String)>);
+
 /// Scan активных сессий. Возвращает (id, path, pairs).
-fn list_active(paths: &Paths) -> Vec<SessionEntry> {
+pub fn list_active(paths: &Paths) -> Vec<SessionEntry> {
     let Ok(entries) = std::fs::read_dir(&paths.sessions_active) else { return vec![]; };
     let mut out = Vec::new();
     for e in entries.flatten() {
@@ -103,7 +104,125 @@ fn list_active(paths: &Paths) -> Vec<SessionEntry> {
     out
 }
 
-type SessionEntry = (String, PathBuf, Vec<(String, String)>);
+// ---------- library API (used by tick.rs) ----------
+
+/// Create a new session record. Returns the session ID.
+#[allow(clippy::too_many_arguments)]
+pub fn session_new(
+    paths: &Paths,
+    task: &str,
+    role: &str,
+    model: &str,
+    repo: &str,
+    run_dir: &str,
+    worktree: Option<&str>,
+    branch: Option<&str>,
+    lease_sec: u64,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let now = chrono::Utc::now();
+    let run_basename_raw = Path::new(run_dir)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("run");
+    let run_basename = sanitize_id_part(run_basename_raw);
+    let task_short = sanitize_id_part(&task.replace("TASK-", ""));
+    let id = format!("SESS-TASK-{task_short}-{run_basename}");
+    let lease_until = now + chrono::Duration::seconds(lease_sec as i64);
+    let worktree_val = worktree.unwrap_or("null");
+    let branch_val = branch.unwrap_or("null");
+    let content = format!(
+        "---\nid: {id}\ntype: session\ntask: {task}\nrole: {role}\nprovider: claude\n\
+         model: {model}\nstate: running\nrepo: {repo}\nworktree: {worktree_val}\n\
+         branch: {branch_val}\nremote: null\nrun-dir: {run_dir}\n\
+         lease-until: {lease_until}\nlast-heartbeat: {now}\nstarted: {now}\nended: null\n\
+         owner-pid: {pid}\nowner-host: {host}\n---\n\n\
+         ## Milestones\n\n## Decisions\n\n## Handoff\n\n## Next\n",
+        lease_until = lease_until.to_rfc3339(),
+        now = now.to_rfc3339(),
+        pid = std::process::id(),
+        host = current_hostname(),
+    );
+    let path = session_path(&paths.sessions_active, &id);
+    write_atomic(&path, &content)?;
+    Ok(id)
+}
+
+/// End a session: set state, write end timestamp, move to _archive.
+pub fn session_end(
+    paths: &Paths,
+    id: &str,
+    state: &str,
+    note: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = match find_session(paths, id) {
+        Some(p) => p,
+        None => return Err(format!("сессия не найдена: {id}").into()),
+    };
+    if !path.starts_with(&paths.sessions_active) {
+        // already archived — idempotent
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let (mut pairs, body_start) = parse_fm(&content);
+    let mut body = content[body_start..].to_owned();
+    let now = chrono::Utc::now();
+    fm_set(&mut pairs, "state", state);
+    fm_set(&mut pairs, "ended", &now.to_rfc3339());
+    if let Some(note_text) = note {
+        body.push_str(&format!("\n## End note\n{note_text}\n"));
+    }
+    let dest = session_path(&paths.sessions_archive, id);
+    write_atomic(&dest, &render_fm(&pairs, &body))?;
+    std::fs::remove_file(&path)?;
+    Ok(())
+}
+
+/// GC stale sessions (lease expired + PID dead on same host). Returns count archived.
+pub fn gc_stale_sessions(paths: &Paths) -> Result<u32, Box<dyn std::error::Error>> {
+    let sessions = list_active(paths);
+    let mut stale_count = 0u32;
+    for (id, path, pairs) in &sessions {
+        let lease_expired = fm_get(pairs, "lease-until")
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| chrono::Utc::now() > t.to_utc())
+            .unwrap_or(true);
+        if !lease_expired { continue; }
+
+        let owner_host = fm_get(pairs, "owner-host").unwrap_or_default();
+        let owner_pid: Option<u32> = fm_get(pairs, "owner-pid").and_then(|s| s.parse().ok());
+        let same_host = owner_host.eq_ignore_ascii_case(&current_hostname());
+        let pid_dead = if same_host {
+            owner_pid.map(|p| !is_pid_alive(p)).unwrap_or(false)
+        } else {
+            false
+        };
+
+        if lease_expired && pid_dead {
+            let content = std::fs::read_to_string(path)?;
+            let (mut fm_pairs, body_start) = parse_fm(&content);
+            let body = &content[body_start..];
+            fm_set(&mut fm_pairs, "state", "stale");
+            fm_set(&mut fm_pairs, "ended", &chrono::Utc::now().to_rfc3339());
+            let dest = session_path(&paths.sessions_archive, id);
+            write_atomic(&dest, &render_fm(&fm_pairs, body))?;
+            std::fs::remove_file(path)?;
+            eprintln!("gc: stale→archived: {id}");
+            stale_count += 1;
+        } else if lease_expired {
+            eprintln!("gc: lease_expired but can't confirm death (fail-closed): {id}");
+        }
+    }
+    Ok(stale_count)
+}
+
+/// Count active sessions with the given role.
+pub fn count_active_by_role(paths: &Paths, role: &str) -> usize {
+    list_active(paths)
+        .iter()
+        .filter(|(_, _, pairs)| fm_get(pairs, "role").as_deref() == Some(role))
+        .count()
+}
 
 // ---------- command handler ----------
 
@@ -114,39 +233,11 @@ pub fn run(hq: PathBuf, args: SessionArgs) -> Result<(), Box<dyn std::error::Err
 
     match args.action {
         SessionAction::New { task, role, model, repo, run_dir, worktree, branch, lease_sec } => {
-            let now = chrono::Utc::now();
-            let run_basename_raw = Path::new(&run_dir)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("run");
-            // id обязан соответствовать pattern схемы: SESS-TASK-[0-9]{4}-[0-9A-Za-z-]+
-            let run_basename = sanitize_id_part(run_basename_raw);
-            let task_short = sanitize_id_part(&task.replace("TASK-", ""));
-            let id = format!("SESS-TASK-{task_short}-{run_basename}");
-            let lease_until = now + chrono::Duration::seconds(lease_sec as i64);
-
-            let worktree_val = worktree.as_deref().unwrap_or("null");
-            let branch_val = branch.as_deref().unwrap_or("null");
-
-            let content = format!(
-                "---\nid: {id}\ntype: session\ntask: {task}\nrole: {role}\nprovider: claude\n\
-                 model: {model}\nstate: running\nrepo: {repo}\nworktree: {worktree_val}\n\
-                 branch: {branch_val}\nremote: null\nrun-dir: {run_dir}\n\
-                 lease-until: {lease_until}\nlast-heartbeat: {now}\nstarted: {now}\nended: null\n\
-                 owner-pid: {pid}\nowner-host: {host}\n---\n\n\
-                 ## Milestones\n\n## Decisions\n\n## Handoff\n\n## Next\n",
-                lease_until = lease_until.to_rfc3339(),
-                now = now.to_rfc3339(),
-                pid = std::process::id(),
-                host = current_hostname(),
-            );
-            let path = session_path(&paths.sessions_active, &id);
-            write_atomic(&path, &content)?;
+            let id = session_new(&paths, &task, &role, &model, &repo, &run_dir, worktree.as_deref(), branch.as_deref(), lease_sec)?;
             println!("{id}");
         }
 
         SessionAction::Heartbeat { id, lease_sec } => {
-            // Heartbeat — только для активных сессий: «оживлять» завершённую (архивную) нельзя.
             let path = session_path(&paths.sessions_active, &id);
             if !path.exists() {
                 return Err(format!("активная сессия не найдена: {id} (завершённую нельзя heartbeat'ить)").into());
@@ -163,24 +254,7 @@ pub fn run(hq: PathBuf, args: SessionArgs) -> Result<(), Box<dyn std::error::Err
         }
 
         SessionAction::End { id, state, note } => {
-            let path = find_session(&paths, &id)
-                .ok_or_else(|| format!("сессия не найдена: {id}"))?;
-            if !path.starts_with(&paths.sessions_active) {
-                eprintln!("сессия уже в архиве: {id}");
-                return Ok(());
-            }
-            let content = std::fs::read_to_string(&path)?;
-            let (mut pairs, body_start) = parse_fm(&content);
-            let mut body = content[body_start..].to_owned();
-            let now = chrono::Utc::now();
-            fm_set(&mut pairs, "state", &state);
-            fm_set(&mut pairs, "ended", &now.to_rfc3339());
-            if let Some(note_text) = note {
-                body.push_str(&format!("\n## End note\n{note_text}\n"));
-            }
-            let dest = session_path(&paths.sessions_archive, &id);
-            write_atomic(&dest, &render_fm(&pairs, &body))?;
-            std::fs::remove_file(&path)?;
+            session_end(&paths, &id, &state, note.as_deref())?;
             println!("ended: {id} → {state} (archived)");
         }
 
@@ -192,7 +266,6 @@ pub fn run(hq: PathBuf, args: SessionArgs) -> Result<(), Box<dyn std::error::Err
                     .map(|(id, _, pairs)| {
                         let mut obj = serde_json::Map::new();
                         for (k, v) in pairs {
-                            // Литерал "null"/пусто → JSON null (для чистого потребления в /hq-status).
                             let val = if v == "null" || v.is_empty() {
                                 serde_json::Value::Null
                             } else {
@@ -220,46 +293,11 @@ pub fn run(hq: PathBuf, args: SessionArgs) -> Result<(), Box<dyn std::error::Err
         }
 
         SessionAction::Gc => {
-            let sessions = list_active(&paths);
-            let mut stale_count = 0u32;
-            for (id, path, pairs) in &sessions {
-                let lease_expired = fm_get(pairs, "lease-until")
-                    .as_deref()
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                    .map(|t| chrono::Utc::now() > t.to_utc())
-                    .unwrap_or(true);
-                if !lease_expired { continue; }
-
-                let owner_host = fm_get(pairs, "owner-host").unwrap_or_default();
-                let owner_pid: Option<u32> = fm_get(pairs, "owner-pid")
-                    .and_then(|s| s.parse().ok());
-                let same_host = owner_host.eq_ignore_ascii_case(&current_hostname());
-                let pid_dead = if same_host {
-                    owner_pid.map(|p| !is_pid_alive(p)).unwrap_or(false)
-                } else {
-                    false
-                };
-
-                if lease_expired && pid_dead {
-                    // Пометить как stale и архивировать
-                    let content = std::fs::read_to_string(path)?;
-                    let (mut fm_pairs, body_start) = parse_fm(&content);
-                    let body = &content[body_start..];
-                    fm_set(&mut fm_pairs, "state", "stale");
-                    fm_set(&mut fm_pairs, "ended", &chrono::Utc::now().to_rfc3339());
-                    let dest = session_path(&paths.sessions_archive, id);
-                    write_atomic(&dest, &render_fm(&fm_pairs, body))?;
-                    std::fs::remove_file(path)?;
-                    println!("stale→archived: {id}");
-                    stale_count += 1;
-                } else {
-                    eprintln!("lease_expired but can't confirm death (fail-closed): {id}");
-                }
-            }
-            if stale_count == 0 {
+            let count = gc_stale_sessions(&paths)?;
+            if count == 0 {
                 println!("gc: нет stale-сессий");
             } else {
-                println!("gc: архивировано {stale_count} stale-сессий");
+                println!("gc: архивировано {count} stale-сессий");
             }
         }
     }

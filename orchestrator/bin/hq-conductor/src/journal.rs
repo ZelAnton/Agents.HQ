@@ -98,6 +98,47 @@ fn next_id(mutations: &[Mutation]) -> String {
     format!("mut-{:03}", mutations.len() + 1)
 }
 
+// ---------- library API (used by tick.rs) ----------
+
+/// Record a mutation intent (`applied=false`). Returns the mutation ID.
+pub fn record_mutation(
+    run_dir: &Path,
+    mutation_type: &str,
+    target: &str,
+    details: Option<serde_json::Value>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut tick = load_tick(run_dir);
+    let mut mutations = get_mutations(&tick);
+    let id = next_id(&mutations);
+    mutations.push(Mutation {
+        id: id.clone(),
+        r#type: mutation_type.to_owned(),
+        target: target.to_owned(),
+        applied: false,
+        details: details.unwrap_or(serde_json::Value::Null),
+    });
+    tick["mutations"] = serde_json::to_value(&mutations)?;
+    save_tick(run_dir, &tick)?;
+    Ok(id)
+}
+
+/// Mark a previously recorded mutation as applied (`applied=true`).
+pub fn mark_mutation_applied(
+    run_dir: &Path,
+    id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut tick = load_tick(run_dir);
+    let mut mutations = get_mutations(&tick);
+    let m = mutations
+        .iter_mut()
+        .find(|m| m.id == id)
+        .ok_or_else(|| format!("mutation not found: {id}"))?;
+    m.applied = true;
+    tick["mutations"] = serde_json::to_value(&mutations)?;
+    save_tick(run_dir, &tick)?;
+    Ok(())
+}
+
 pub fn run(_hq: PathBuf, args: JournalArgs) -> Result<(), Box<dyn std::error::Error>> {
     let run_dir = &args.run_dir;
     match args.action {

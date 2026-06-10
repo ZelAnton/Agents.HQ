@@ -1,10 +1,12 @@
 mod claim;
+mod dispatch;
 mod doctor;
 mod fm;
 mod journal;
 mod metrics;
 mod session;
 mod state;
+mod tick;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -31,6 +33,8 @@ enum Cmd {
     Journal(journal::JournalArgs),
     /// Управление сессиями агентов (M1)
     Session(session::SessionArgs),
+    /// Детерминированный тик-диспетчер (M2)
+    Tick(tick::TickArgs),
 }
 
 #[tokio::main]
@@ -53,6 +57,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Claim(a) => claim::run(hq, a)?,
         Cmd::Journal(a) => journal::run(hq, a)?,
         Cmd::Session(a) => session::run(hq, a)?,
+        Cmd::Tick(a) => tick::run(hq, a)?,
     }
     Ok(())
 }

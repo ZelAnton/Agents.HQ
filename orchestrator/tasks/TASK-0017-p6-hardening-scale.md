@@ -1,16 +1,18 @@
----
+﻿---
 id: TASK-0017
 type: task
 title: Оркестратор P6 — hardening, масштаб, наблюдаемость
 date: 2026-06-09
 scope: orchestrator
-status: queued
+status: in-progress
 priority: P2
 repos: [orchestrator]
 depends-on: [TASK-0016]
 parallel-safe-with: []
 assigned-to: null
 origin: orchestrator/ROADMAP.md (P6)
+session: null
+risk: null
 ---
 
 ## Цель

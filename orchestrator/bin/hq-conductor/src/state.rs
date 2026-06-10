@@ -26,6 +26,8 @@ pub struct Paths {
     pub sessions_active: PathBuf,
     pub sessions_archive: PathBuf,
     pub tasks: PathBuf,
+    /// `orchestrator/automation.json` — pause / policy overrides
+    pub automation_json: PathBuf,
 }
 
 impl Paths {
@@ -40,7 +42,8 @@ impl Paths {
         let sessions_active = orch.join("sessions").join("active");
         let sessions_archive = orch.join("sessions").join("_archive");
         let tasks = hq.join("tasks");
-        Self { hq, orch, runs, lock, lock5, status, status_template, schemas, sessions_active, sessions_archive, tasks }
+        let automation_json = orch.join("automation.json");
+        Self { hq, orch, runs, lock, lock5, status, status_template, schemas, sessions_active, sessions_archive, tasks, automation_json }
     }
 
     /// Родительская директория .hq (Personal/).

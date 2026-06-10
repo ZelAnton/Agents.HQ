@@ -1,4 +1,4 @@
----
+﻿---
 id: TASK-0018
 type: task
 title: Автономный агентный процесс — три очереди, сессии, диспетчер, skills
@@ -11,6 +11,8 @@ depends-on: [TASK-0017]
 parallel-safe-with: []
 assigned-to: null
 origin: human/conversation-2026-06-10
+session: null
+risk: null
 ---
 
 ## Цель

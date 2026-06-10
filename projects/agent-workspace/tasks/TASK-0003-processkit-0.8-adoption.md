@@ -1,4 +1,4 @@
----
+﻿---
 id: TASK-0003
 type: task
 title: agent-workspace — переход на ProcessKit 0.8
@@ -11,6 +11,8 @@ depends-on: []
 parallel-safe-with: [TASK-0001, TASK-0002]
 assigned-to: null
 origin: migration (root processkit-0.8-instructions-agent-workspace.md)
+session: null
+risk: null
 ---
 
 ## Цель

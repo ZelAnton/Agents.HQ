@@ -1,4 +1,4 @@
----
+﻿---
 id: TASK-0002
 type: task
 title: vcs-flow-rs — переход на ProcessKit 0.8
@@ -11,6 +11,8 @@ depends-on: [TASK-0001]
 parallel-safe-with: [TASK-0003]
 assigned-to: null
 origin: migration (root processkit-0.8-instructions-vcs-flow-rs.md)
+session: null
+risk: null
 ---
 
 ## Цель

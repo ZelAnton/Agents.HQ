@@ -197,7 +197,7 @@ pub fn compute(hq: &Path, window: usize) -> Metrics {
 }
 
 /// Заменяет секцию `## Метрики` в содержимом STATUS.
-fn render_status(content: &str, m: &Metrics, window: usize) -> String {
+pub fn render_status(content: &str, m: &Metrics, window: usize) -> String {
     let section = format!(
         "## Метрики последних тиков (окно: {} прогонов)\n\
          - задач/тик: {} · % зелёных тестов: {} · конфликты: {} (авто-разрешено: {})\n\
