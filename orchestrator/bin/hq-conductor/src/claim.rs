@@ -1,3 +1,4 @@
+use crate::fm::{fm_get, fm_remove, fm_set, parse_fm, render_fm};
 use crate::state::{current_hostname, is_pid_alive};
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -30,74 +31,6 @@ pub enum ClaimAction {
     Release {
         task: PathBuf,
     },
-}
-
-// ---------- frontmatter helpers ----------
-
-#[allow(dead_code)]
-fn find_fm_end(content: &str) -> Option<usize> {
-    if !content.starts_with("---") { return None; }
-    let after = &content[3..]; // skip opening ---
-    // skip optional newline after ---
-    let after = after.strip_prefix('\n').unwrap_or(after);
-    let close = after.find("\n---")?;
-    Some(3 + if content[3..].starts_with('\n') { 1 } else { 0 } + close + 4)
-}
-
-/// Парсит frontmatter: возвращает пары (key, value) и позицию после закрывающего ---
-fn parse_fm(content: &str) -> (Vec<(String, String)>, usize) {
-    if !content.starts_with("---") {
-        return (vec![], 0);
-    }
-    let after_open = content.trim_start_matches("---");
-    // find closing ---
-    let close = match after_open.find("\n---") {
-        Some(i) => i,
-        None => return (vec![], 0),
-    };
-    let fm_text = &after_open[..close];
-    let body_start = content.len() - after_open.len() + close + 4; // after \n---
-
-    let pairs: Vec<(String, String)> = fm_text
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { return None; }
-            let (k, v) = line.split_once(':')?;
-            Some((k.trim().to_owned(), v.trim().to_owned()))
-        })
-        .collect();
-
-    (pairs, body_start.min(content.len()))
-}
-
-fn render_fm(pairs: &[(String, String)], body: &str) -> String {
-    let mut s = String::from("---\n");
-    for (k, v) in pairs {
-        s.push_str(k);
-        s.push_str(": ");
-        s.push_str(v);
-        s.push('\n');
-    }
-    s.push_str("---");
-    s.push_str(body);
-    s
-}
-
-fn fm_get(pairs: &[(String, String)], key: &str) -> Option<String> {
-    pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
-}
-
-fn fm_set(pairs: &mut Vec<(String, String)>, key: &str, val: &str) {
-    if let Some(pos) = pairs.iter().position(|(k, _)| k == key) {
-        pairs[pos].1 = val.to_owned();
-    } else {
-        pairs.push((key.to_owned(), val.to_owned()));
-    }
-}
-
-fn fm_remove(pairs: &mut Vec<(String, String)>, key: &str) {
-    pairs.retain(|(k, _)| k != key);
 }
 
 // ---------- command handler ----------

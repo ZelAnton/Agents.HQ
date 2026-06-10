@@ -1,5 +1,6 @@
 mod claim;
 mod doctor;
+mod fm;
 mod journal;
 mod metrics;
 mod session;

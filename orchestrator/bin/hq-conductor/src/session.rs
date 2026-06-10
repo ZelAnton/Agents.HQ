@@ -1,3 +1,4 @@
+use crate::fm::{fm_get, fm_set, parse_fm, render_fm};
 use crate::state::{current_hostname, is_pid_alive, Paths};
 use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
@@ -55,56 +56,6 @@ pub enum SessionAction {
     Gc,
 }
 
-// ---------- frontmatter helpers (shared с claim.rs через state) ----------
-
-fn parse_fm(content: &str) -> (Vec<(String, String)>, usize) {
-    if !content.starts_with("---") {
-        return (vec![], 0);
-    }
-    let after_open = content.trim_start_matches("---");
-    let close = match after_open.find("\n---") {
-        Some(i) => i,
-        None => return (vec![], 0),
-    };
-    let fm_text = &after_open[..close];
-    let body_start = content.len() - after_open.len() + close + 4;
-    let pairs: Vec<(String, String)> = fm_text
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { return None; }
-            let (k, v) = line.split_once(':')?;
-            Some((k.trim().to_owned(), v.trim().to_owned()))
-        })
-        .collect();
-    (pairs, body_start.min(content.len()))
-}
-
-fn render_fm(pairs: &[(String, String)], body: &str) -> String {
-    let mut s = String::from("---\n");
-    for (k, v) in pairs {
-        s.push_str(k);
-        s.push_str(": ");
-        s.push_str(v);
-        s.push('\n');
-    }
-    s.push_str("---");
-    s.push_str(body);
-    s
-}
-
-fn fm_get(pairs: &[(String, String)], key: &str) -> Option<String> {
-    pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
-}
-
-fn fm_set(pairs: &mut Vec<(String, String)>, key: &str, val: &str) {
-    if let Some(pos) = pairs.iter().position(|(k, _)| k == key) {
-        pairs[pos].1 = val.to_owned();
-    } else {
-        pairs.push((key.to_owned(), val.to_owned()));
-    }
-}
-
 // ---------- session file helpers ----------
 
 fn session_path(dir: &Path, id: &str) -> PathBuf {
@@ -112,10 +63,19 @@ fn session_path(dir: &Path, id: &str) -> PathBuf {
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let tmp = path.with_extension("md.tmp");
+    // Уникальный tmp по PID: два писателя (heartbeat/gc/два тика) не делят один tmp-файл (гонка).
+    let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Санитизирует строку под класс `[0-9A-Za-z-]` (требование pattern в session.schema.json):
+/// прочие символы (`_`, `.`, unicode и т.п.) → `-`.
+fn sanitize_id_part(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect()
 }
 
 fn find_session(paths: &Paths, id: &str) -> Option<PathBuf> {
@@ -155,11 +115,13 @@ pub fn run(hq: PathBuf, args: SessionArgs) -> Result<(), Box<dyn std::error::Err
     match args.action {
         SessionAction::New { task, role, model, repo, run_dir, worktree, branch, lease_sec } => {
             let now = chrono::Utc::now();
-            let run_basename = Path::new(&run_dir)
+            let run_basename_raw = Path::new(&run_dir)
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("run");
-            let task_short = task.replace("TASK-", "");
+            // id обязан соответствовать pattern схемы: SESS-TASK-[0-9]{4}-[0-9A-Za-z-]+
+            let run_basename = sanitize_id_part(run_basename_raw);
+            let task_short = sanitize_id_part(&task.replace("TASK-", ""));
             let id = format!("SESS-TASK-{task_short}-{run_basename}");
             let lease_until = now + chrono::Duration::seconds(lease_sec as i64);
 
@@ -184,8 +146,11 @@ pub fn run(hq: PathBuf, args: SessionArgs) -> Result<(), Box<dyn std::error::Err
         }
 
         SessionAction::Heartbeat { id, lease_sec } => {
-            let path = find_session(&paths, &id)
-                .ok_or_else(|| format!("сессия не найдена: {id}"))?;
+            // Heartbeat — только для активных сессий: «оживлять» завершённую (архивную) нельзя.
+            let path = session_path(&paths.sessions_active, &id);
+            if !path.exists() {
+                return Err(format!("активная сессия не найдена: {id} (завершённую нельзя heartbeat'ить)").into());
+            }
             let content = std::fs::read_to_string(&path)?;
             let (mut pairs, body_start) = parse_fm(&content);
             let body = &content[body_start..];
@@ -227,7 +192,13 @@ pub fn run(hq: PathBuf, args: SessionArgs) -> Result<(), Box<dyn std::error::Err
                     .map(|(id, _, pairs)| {
                         let mut obj = serde_json::Map::new();
                         for (k, v) in pairs {
-                            obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+                            // Литерал "null"/пусто → JSON null (для чистого потребления в /hq-status).
+                            let val = if v == "null" || v.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                serde_json::Value::String(v.clone())
+                            };
+                            obj.insert(k.clone(), val);
                         }
                         obj.insert("id".to_owned(), serde_json::Value::String(id.clone()));
                         serde_json::Value::Object(obj)
