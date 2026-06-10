@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hq/orchestrator/session",
+  "title": "Session record — живая память выполнения агентной сессии",
+  "description": "Frontmatter сессионного файла в orchestrator/sessions/{active,_archive}/SESS-<TASK>-<run_id>.md",
+  "type": "object",
+  "required": ["id", "type", "task", "role", "model", "state", "repo", "worktree", "run-dir", "started"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^SESS-TASK-[0-9]{4}-[0-9A-Za-z-]+$",
+      "description": "Уникальный ID сессии: SESS-<TASK-id>-<run_id>"
+    },
+    "type": {
+      "type": "string",
+      "const": "session"
+    },
+    "task": {
+      "type": "string",
+      "pattern": "^TASK-[0-9]{4}$",
+      "description": "ID задачи, которую выполняет сессия"
+    },
+    "role": {
+      "type": "string",
+      "enum": ["plan", "exec", "review"],
+      "description": "Роль сессии: планировщик / исполнитель / ревьюер"
+    },
+    "provider": {
+      "type": "string",
+      "default": "claude",
+      "description": "LLM-провайдер"
+    },
+    "model": {
+      "type": "string",
+      "description": "Модель (например claude-sonnet-4-6, claude-opus-4-8)"
+    },
+    "state": {
+      "type": "string",
+      "enum": ["running", "done", "failed", "stale"],
+      "description": "Текущее состояние сессии"
+    },
+    "repo": {
+      "type": "string",
+      "description": "Имя репозитория"
+    },
+    "worktree": {
+      "type": ["string", "null"],
+      "description": "Путь к jj workspace / git worktree"
+    },
+    "branch": {
+      "type": ["string", "null"],
+      "description": "Bookmark/ветка в jj/git"
+    },
+    "remote": {
+      "type": ["string", "null"],
+      "description": "Ссылка на удалённое управление (PR URL и т.п.)"
+    },
+    "run-dir": {
+      "type": "string",
+      "description": "Ссылка на _runs/<run_id>/ — там тяжёлые данные (diff, логи, результаты)"
+    },
+    "lease-until": {
+      "type": ["string", "null"],
+      "description": "ISO-8601 — до когда лиза активна; продлевается heartbeat"
+    },
+    "last-heartbeat": {
+      "type": ["string", "null"],
+      "description": "ISO-8601 — время последнего heartbeat"
+    },
+    "started": {
+      "type": "string",
+      "description": "ISO-8601 — старт сессии"
+    },
+    "ended": {
+      "type": ["string", "null"],
+      "description": "ISO-8601 — завершение сессии"
+    }
+  }
+}

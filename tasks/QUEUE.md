@@ -35,9 +35,10 @@
 | TASK-0014 | P3 кросс-репо ∥ | orchestrator | **done** | TASK-0013 | `../orchestrator/tasks/TASK-0014-p3-cross-repo-parallel.md` |
 | TASK-0015 | P4 jj-интеграция + авто-land | orchestrator | **done** | TASK-0014 | `../orchestrator/tasks/TASK-0015-p4-jj-integration-autoland.md` |
 | TASK-0016 | P5 внутри-репо ∥ | orchestrator | **done** | TASK-0015 | `../orchestrator/tasks/TASK-0016-p5-intra-repo-parallel.md` |
-| TASK-0017 | P6 hardening/scale | orchestrator | **ready** | TASK-0016 | `../orchestrator/tasks/TASK-0017-p6-hardening-scale.md` |
+| TASK-0017 | P6 hardening/scale | orchestrator | **in-progress** | TASK-0016 | `../orchestrator/tasks/TASK-0017-p6-hardening-scale.md` |
+| TASK-0018 | P6 автономный процесс | orchestrator | **in-progress** | TASK-0017 | `../orchestrator/tasks/TASK-0018-autonomous-queue-orchestration.md` |
 
-Следующая готовая: **TASK-0017 (P6)** — зависимость (P5) выполнена.
+Следующая готовая: **TASK-0018** — реализуется поэтапно (M1→M4).
 *(Номера 0005–0010 использованы примером валидационной фикстуры в `../orchestrator/_runs/` и в очередь НЕ входят.)*
 
 ## Правила (кратко)

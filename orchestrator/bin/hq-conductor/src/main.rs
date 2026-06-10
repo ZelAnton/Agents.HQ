@@ -2,6 +2,7 @@ mod claim;
 mod doctor;
 mod journal;
 mod metrics;
+mod session;
 mod state;
 
 use clap::{Parser, Subcommand};
@@ -27,6 +28,8 @@ enum Cmd {
     Claim(claim::ClaimArgs),
     /// Идемпотентный журнал мутаций tick.json (S3)
     Journal(journal::JournalArgs),
+    /// Управление сессиями агентов (M1)
+    Session(session::SessionArgs),
 }
 
 #[tokio::main]
@@ -48,6 +51,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Doctor(a) => doctor::run(hq, a).await?,
         Cmd::Claim(a) => claim::run(hq, a)?,
         Cmd::Journal(a) => journal::run(hq, a)?,
+        Cmd::Session(a) => session::run(hq, a)?,
     }
     Ok(())
 }

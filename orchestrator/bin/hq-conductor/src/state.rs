@@ -23,6 +23,9 @@ pub struct Paths {
     pub status: PathBuf,
     pub status_template: PathBuf,
     pub schemas: PathBuf,
+    pub sessions_active: PathBuf,
+    pub sessions_archive: PathBuf,
+    pub tasks: PathBuf,
 }
 
 impl Paths {
@@ -34,7 +37,10 @@ impl Paths {
         let status = orch.join("STATUS.md");
         let status_template = orch.join("STATUS.template.md");
         let schemas = orch.join("schemas");
-        Self { hq, orch, runs, lock, lock5, status, status_template, schemas }
+        let sessions_active = orch.join("sessions").join("active");
+        let sessions_archive = orch.join("sessions").join("_archive");
+        let tasks = hq.join("tasks");
+        Self { hq, orch, runs, lock, lock5, status, status_template, schemas, sessions_active, sessions_archive, tasks }
     }
 
     /// Родительская директория .hq (Personal/).

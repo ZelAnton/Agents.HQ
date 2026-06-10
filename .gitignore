@@ -13,6 +13,12 @@ orchestrator/_state/
 orchestrator/bin/hq-spawn/target/
 orchestrator/bin/hq-conductor/target/
 
+# Сессии: активные и архив (могут содержать пути и PID — не в публичный remote)
+orchestrator/sessions/active/*
+!orchestrator/sessions/active/.gitkeep
+orchestrator/sessions/_archive/*
+!orchestrator/sessions/_archive/.gitkeep
+
 # OS
 .DS_Store
 Thumbs.db

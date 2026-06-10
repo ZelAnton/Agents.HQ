@@ -1,19 +1,24 @@
 #requires -Version 7
 <#
 .SYNOPSIS
-  Устанавливает skill /comms из ИСТОЧНИКА ПРАВДЫ (.hq/orchestrator/skills/comms/SKILL.md)
-  в .claude/skills/comms/ (каталог, который обнаруживает Claude Code при cwd = d:/GitHub/Personal).
-  Запускать после правок SKILL.md в .hq, иначе install-копия устареет (L1 из ревью 2026-06-09).
+  Устанавливает skills из ИСТОЧНИКОВ ПРАВДЫ (.hq/orchestrator/skills/<name>/SKILL.md)
+  в .claude/skills/<name>/ (каталог, который обнаруживает Claude Code при cwd = d:/GitHub/Personal).
+  Запускать после правок любого SKILL.md в .hq, иначе install-копии устареют.
 #>
 $ErrorActionPreference = 'Stop'
-$src = (Resolve-Path (Join-Path $PSScriptRoot '../skills/comms/SKILL.md')).Path
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path   # d:/GitHub/Personal
-$dstDir = Join-Path $repoRoot '.claude/skills/comms'
-New-Item -ItemType Directory -Force $dstDir | Out-Null
-$dst = Join-Path $dstDir 'SKILL.md'
-Copy-Item $src $dst -Force
-$match = (Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash
-Write-Host "source : $src"
-Write-Host "install: $dst"
-Write-Host "hash match: $match"
-if (-not $match) { throw 'install-копия не совпала с источником' }
+$skillsRoot = Join-Path $PSScriptRoot '../skills'
+
+$skills = Get-ChildItem -Path $skillsRoot -Directory | Select-Object -ExpandProperty Name
+
+foreach ($name in $skills) {
+    $src = Join-Path $skillsRoot "$name/SKILL.md"
+    if (-not (Test-Path $src)) { Write-Warning "Нет $src, пропускаем"; continue }
+    $dstDir = Join-Path $repoRoot ".claude/skills/$name"
+    New-Item -ItemType Directory -Force $dstDir | Out-Null
+    $dst = Join-Path $dstDir 'SKILL.md'
+    Copy-Item $src $dst -Force
+    $match = (Get-FileHash $src).Hash -eq (Get-FileHash $dst).Hash
+    Write-Host "[$name] $src → $dst  hash=$match"
+    if (-not $match) { throw "install-копия $name не совпала с источником" }
+}
