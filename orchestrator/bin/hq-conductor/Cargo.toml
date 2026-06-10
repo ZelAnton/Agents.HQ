@@ -1,0 +1,18 @@
+[package]
+name = "hq-conductor"
+version = "0.1.0"
+edition = "2021"
+description = "Дирижёр .hq — метрики, recovery-probe, lease/claim (P6 S1–S3)"
+
+[[bin]]
+name = "hq-conductor"
+path = "src/main.rs"
+
+[dependencies]
+processkit  = "0.9"
+tokio       = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+clap        = { version = "4", features = ["derive"] }
+chrono      = { version = "0.4", features = ["serde"] }
+vcs-jj      = "0.5"

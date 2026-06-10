@@ -26,6 +26,39 @@
     },
     "planned": { "type": "array", "items": { "type": "string" }, "description": "id заведённых TASK-####" },
     "errors": { "type": "array", "items": { "type": "string" } },
-    "notes": { "type": "string" }
+    "notes": { "type": "string" },
+    "metrics": {
+      "type": "object",
+      "description": "Метрики §11.8 (S1) — опционально, генерируется hq-conductor metrics",
+      "additionalProperties": false,
+      "properties": {
+        "window_runs":                { "type": "integer" },
+        "tasks_per_tick":             { "type": ["number", "null"] },
+        "tests_green_pct":            { "type": ["number", "null"] },
+        "conflict_pct":               { "type": ["number", "null"] },
+        "conflict_auto_resolved_pct": { "type": ["number", "null"] },
+        "escalation_pct":             { "type": ["number", "null"] },
+        "revert_pct":                 { "type": ["number", "null"] },
+        "auto_land_pct":              { "type": ["number", "null"] },
+        "avg_task_sec":               { "type": ["number", "null"] },
+        "tokens_per_tick":            { "type": ["number", "null"] }
+      }
+    },
+    "mutations": {
+      "type": "array",
+      "description": "Идемпотентный журнал мутаций (S3) — applied:false → намерение, applied:true → выполнено",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "target", "applied"],
+        "properties": {
+          "id":      { "type": "string", "description": "mut-NNN" },
+          "type":    { "type": "string", "description": "тип мутации: land / claim / rebase / …" },
+          "target":  { "type": "string", "description": "репо или задача, которую мутируем" },
+          "applied": { "type": "boolean" },
+          "details": { "description": "произвольные детали (опционально)" }
+        }
+      }
+    }
   }
 }

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hq/orchestrator/claim",
+  "title": "Lease/claim frontmatter — поля задачи при захвате исполнителем (S3)",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "assigned-to": {
+      "type": ["string", "null"],
+      "description": "Имя исполнителя или null если свободно"
+    },
+    "claimed-at": {
+      "type": "string",
+      "description": "ISO-8601 время захвата"
+    },
+    "lease-until": {
+      "type": "string",
+      "description": "ISO-8601 время окончания lease (claimed-at + timeout + grace)"
+    },
+    "owner-pid": {
+      "type": ["integer", "string"],
+      "description": "PID процесса, взявшего claim"
+    },
+    "owner-host": {
+      "type": "string",
+      "description": "Имя хоста owner-pid"
+    }
+  }
+}
