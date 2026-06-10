@@ -1,7 +1,7 @@
 //! Task discovery and dispatch selection for `hq-conductor tick`.
 
 use crate::fm::{fm_get, parse_fm};
-use crate::state::{current_hostname, is_pid_alive, Paths};
+use crate::state::{owner_reclaimable, Paths};
 use std::path::{Path, PathBuf};
 
 // ---------- TaskInfo ----------
@@ -92,15 +92,15 @@ pub fn scan_all_tasks(paths: &Paths) -> Vec<TaskInfo> {
 
 // ---------- Claim helpers ----------
 
-/// Is the task's claim free (no owner, or lease expired + PID confirmed dead on same host)?
+/// Is the task's claim free? No owner → free; otherwise delegate to the shared
+/// `owner_reclaimable` logic (fast reclaim on confirmed-dead PID, lease timeout as
+/// backstop, fail-closed for unverifiable owners). Same logic as session GC, so the
+/// two never disagree about whether an owner is gone.
 pub fn task_is_free(task: &TaskInfo) -> bool {
-    if task.assigned_to.is_none() { return true; }
-    let lease_expired = task.lease_until.map(|t| chrono::Utc::now() > t).unwrap_or(true);
-    if !lease_expired { return false; }
-    // Fail-closed: only release if PID is confirmed dead on same host
-    let same_host = task.owner_host.eq_ignore_ascii_case(&current_hostname());
-    if !same_host { return false; }
-    task.owner_pid.map(|p| !is_pid_alive(p)).unwrap_or(false)
+    if task.assigned_to.is_none() {
+        return true;
+    }
+    owner_reclaimable(&task.owner_host, task.owner_pid, task.lease_until)
 }
 
 // ---------- Dependency check ----------
@@ -124,6 +124,9 @@ fn priority_ord(p: &str) -> u8 {
 
 /// Select tasks for dispatch: filter by `target_status`, free claim, per-repo cap.
 /// Returns up to `available_slots` tasks sorted by priority (P0 first).
+/// NB: `max_per_repo` is applied PER ROLE (this call is one role). A repo may thus have
+/// up to `max_per_repo` tasks in flight in each of plan/exec/review simultaneously — by
+/// design, since the three are distinct resources (planner/exec/reviewer slots).
 pub fn select_for_dispatch<'a>(
     tasks: &'a [TaskInfo],
     target_status: &str,

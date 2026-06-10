@@ -30,7 +30,9 @@ pub enum JournalAction {
     },
     /// Показать все мутации прогона
     List,
-    /// Показать невыполненные (applied=false) — для идемпотентного replay
+    /// Показать невыполненные (applied=false). ВНИМАНИЕ: это аудит-инструмент — он лишь
+    /// перечисляет незавершённые мутации, НЕ доигрывает их. Восстановление в tick — это
+    /// реконсиляция по состоянию (статус+lease), а журнал фиксирует намерения/applied-флаг.
     Replay,
 }
 
@@ -82,7 +84,7 @@ fn save_tick(run_dir: &Path, v: &serde_json::Value) -> Result<(), Box<dyn std::e
     let path = tick_path(run_dir);
     std::fs::create_dir_all(run_dir)?;
     let json = serde_json::to_string_pretty(v)?;
-    let tmp = path.with_extension("json.tmp");
+    let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
     std::fs::write(&tmp, &json)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())

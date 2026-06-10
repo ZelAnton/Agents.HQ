@@ -1,5 +1,5 @@
 use crate::fm::{fm_get, fm_set, parse_fm, render_fm};
-use crate::state::{current_hostname, is_pid_alive, Paths};
+use crate::state::{current_hostname, owner_reclaimable, Paths};
 use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -124,8 +124,16 @@ pub fn session_new(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("run");
-    let run_basename = sanitize_id_part(run_basename_raw);
-    let task_short = sanitize_id_part(&task.replace("TASK-", ""));
+    // Гарантируем непустые части, иначе id нарушит pattern схемы
+    // (^SESS-TASK-[0-9A-Za-z-]+-[0-9A-Za-z-]+$): пустой run_dir/таск → фолбэк.
+    let run_basename = {
+        let s = sanitize_id_part(run_basename_raw);
+        if s.is_empty() { "run".to_owned() } else { s }
+    };
+    let task_short = {
+        let s = sanitize_id_part(&task.replace("TASK-", ""));
+        if s.is_empty() { "0000".to_owned() } else { s }
+    };
     let id = format!("SESS-TASK-{task_short}-{run_basename}");
     let lease_until = now + chrono::Duration::seconds(lease_sec as i64);
     let worktree_val = worktree.unwrap_or("null");
@@ -164,6 +172,9 @@ pub fn session_end(
     }
     let content = std::fs::read_to_string(&path)?;
     let (mut pairs, body_start) = parse_fm(&content);
+    if body_start == 0 {
+        return Err(format!("отказ закрытия сессии {id}: повреждённый frontmatter").into());
+    }
     let mut body = content[body_start..].to_owned();
     let now = chrono::Utc::now();
     fm_set(&mut pairs, "state", state);
@@ -177,41 +188,38 @@ pub fn session_end(
     Ok(())
 }
 
-/// GC stale sessions (lease expired + PID dead on same host). Returns count archived.
+/// GC stale sessions. Uses the SAME `owner_reclaimable` logic as task claims, so a session
+/// is archived exactly when its owner is provably gone (dead PID) or after the force-grace
+/// backstop (covers cross-host + PID-reuse). Returns count archived.
 pub fn gc_stale_sessions(paths: &Paths) -> Result<u32, Box<dyn std::error::Error>> {
     let sessions = list_active(paths);
     let mut stale_count = 0u32;
     for (id, path, pairs) in &sessions {
-        let lease_expired = fm_get(pairs, "lease-until")
-            .as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| chrono::Utc::now() > t.to_utc())
-            .unwrap_or(true);
-        if !lease_expired { continue; }
-
         let owner_host = fm_get(pairs, "owner-host").unwrap_or_default();
         let owner_pid: Option<u32> = fm_get(pairs, "owner-pid").and_then(|s| s.parse().ok());
-        let same_host = owner_host.eq_ignore_ascii_case(&current_hostname());
-        let pid_dead = if same_host {
-            owner_pid.map(|p| !is_pid_alive(p)).unwrap_or(false)
-        } else {
-            false
-        };
+        let lease_until = fm_get(pairs, "lease-until")
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.to_utc());
 
-        if lease_expired && pid_dead {
-            let content = std::fs::read_to_string(path)?;
-            let (mut fm_pairs, body_start) = parse_fm(&content);
-            let body = &content[body_start..];
-            fm_set(&mut fm_pairs, "state", "stale");
-            fm_set(&mut fm_pairs, "ended", &chrono::Utc::now().to_rfc3339());
-            let dest = session_path(&paths.sessions_archive, id);
-            write_atomic(&dest, &render_fm(&fm_pairs, body))?;
-            std::fs::remove_file(path)?;
-            eprintln!("gc: stale→archived: {id}");
-            stale_count += 1;
-        } else if lease_expired {
-            eprintln!("gc: lease_expired but can't confirm death (fail-closed): {id}");
+        if !owner_reclaimable(&owner_host, owner_pid, lease_until) {
+            continue;
         }
+
+        let content = std::fs::read_to_string(path)?;
+        let (mut fm_pairs, body_start) = parse_fm(&content);
+        if body_start == 0 {
+            eprintln!("gc: повреждённый FM сессии, пропуск: {id}");
+            continue;
+        }
+        let body = &content[body_start..];
+        fm_set(&mut fm_pairs, "state", "stale");
+        fm_set(&mut fm_pairs, "ended", &chrono::Utc::now().to_rfc3339());
+        let dest = session_path(&paths.sessions_archive, id);
+        write_atomic(&dest, &render_fm(&fm_pairs, body))?;
+        std::fs::remove_file(path)?;
+        eprintln!("gc: stale→archived: {id}");
+        stale_count += 1;
     }
     Ok(stale_count)
 }
@@ -244,6 +252,9 @@ pub fn run(hq: PathBuf, args: SessionArgs) -> Result<(), Box<dyn std::error::Err
             }
             let content = std::fs::read_to_string(&path)?;
             let (mut pairs, body_start) = parse_fm(&content);
+            if body_start == 0 {
+                return Err(format!("отказ heartbeat сессии {id}: повреждённый frontmatter").into());
+            }
             let body = &content[body_start..];
             let now = chrono::Utc::now();
             let lease_until = now + chrono::Duration::seconds(lease_sec as i64);

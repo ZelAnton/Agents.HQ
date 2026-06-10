@@ -1,13 +1,30 @@
 //! Deterministic tick dispatcher for `hq-conductor tick`.
 //! --mode mock runs canonical workers without LLM calls (for testing the state machine).
+//!
+//! Crash-safety model (important — read before changing recovery):
+//! Восстановление здесь — **реконсиляция по состоянию**, а не буквальный replay журнала.
+//! Журнал (`_runs/<run_id>/tick.json`, mutations[] с `applied:bool`) — это аудит-след
+//! намерений; его никто не «доигрывает». Гарантии даёт сочетание:
+//!   1. claim с lease+PID+host (fail-closed): `owner_reclaimable` отдаёт задачу только если
+//!      владелец точно мёртв (или после force-grace), поэтому двойного claim/спавна нет;
+//!   2. каждый статус-переход — ОДНА атомарная запись FM (нет «claimed, но статус ещё старый»
+//!      для exec/review таким образом, что задача потерялась бы);
+//!   3. рекавери в начале тика чинит «зависшие»: `in-progress` без живого claim → `ready`,
+//!      `fix-needed` → requeue/escalate; задачи в intake/ready/in-review с протухшим claim
+//!      снова становятся свободными для select (claim перезапишется при ре-диспатче);
+//!   4. `gc_stale_sessions` архивирует осиротевшие сессии той же логикой `owner_reclaimable`.
+//!
+//! Убийство тика на любом шаге → следующий тик реконсилит и доводит, без двойной работы.
 
 use crate::dispatch::{self, TaskInfo};
 use crate::fm::{fm_get, fm_remove, fm_set, parse_fm, render_fm};
+use crate::journal;
 use crate::metrics;
 use crate::session;
 use crate::state::{current_hostname, LockInfo, Paths};
-use crate::journal;
 use clap::{Args, ValueEnum};
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 const FIX_MAX: u32 = 3;
@@ -71,21 +88,42 @@ impl Drop for LockGuard {
 // ---------- Lock acquire ----------
 
 fn acquire_lock(lock_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if lock_path.exists() {
-        if let Some(lock) = LockInfo::read(lock_path) {
-            if lock.is_pid_alive() && !lock.is_stale() {
-                return Err(format!(
-                    "lock занят (PID={}, <30 мин) — попробуй позже",
-                    lock.pid
-                )
-                .into());
+    // Атомарное получение через create_new (O_EXCL): исключает TOCTOU-гонку двух тиков,
+    // где оба видят «нет лока», оба пишут и оба продолжают (двойной спавн/claim).
+    for _ in 0..3 {
+        match OpenOptions::new().write(true).create_new(true).open(lock_path) {
+            Ok(mut f) => {
+                // Окно «файл создан, но пустой» до write_all: конкурент прочитает его как
+                // непарсящийся и попробует remove_file. На Windows наш открытый хэндл `f`
+                // (без FILE_SHARE_DELETE) блокирует удаление, пока мы не закончим запись —
+                // поэтому гонка безопасна. Хэндл живёт до конца функции (drop при return).
+                let content = format!("{}\t{}", std::process::id(), chrono::Utc::now().to_rfc3339());
+                f.write_all(content.as_bytes())?;
+                return Ok(());
             }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Лок существует. Забираем только если владелец мёртв ИЛИ лок протух.
+                match LockInfo::read(lock_path) {
+                    Some(lock) if lock.is_pid_alive() && !lock.is_stale() => {
+                        return Err(format!(
+                            "lock занят (PID={}, ещё свежий) — попробуй позже",
+                            lock.pid
+                        )
+                        .into());
+                    }
+                    // мёртвый/протухший/непарсящийся → удалить и повторить create_new.
+                    // Если конкурент успеет создать свой между remove и create_new — снова
+                    // AlreadyExists, и цикл (до 3 раз) отрабатывает корректно.
+                    _ => {
+                        std::fs::remove_file(lock_path).ok();
+                        continue;
+                    }
+                }
+            }
+            Err(e) => return Err(e.into()),
         }
-        std::fs::remove_file(lock_path).ok();
     }
-    let content = format!("{}\t{}", std::process::id(), chrono::Utc::now().to_rfc3339());
-    std::fs::write(lock_path, content)?;
-    Ok(())
+    Err("не удалось получить lock после нескольких попыток (гонка?)".into())
 }
 
 // ---------- Task frontmatter helpers ----------
@@ -98,6 +136,16 @@ fn write_task_fm(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(path)?;
     let (mut pairs, body_start) = parse_fm(&content);
+    // body_start == 0 ⇔ parse_fm не нашёл валидный frontmatter (нет открывающего/закрывающего
+    // `---`). Записывать в таком случае нельзя: render_fm затолкал бы весь файл в тело и потерял
+    // бы исходные поля (id/scope/depends-on…) — задача молча выпала бы из диспетчера. Отказ.
+    if body_start == 0 {
+        return Err(format!(
+            "отказ записи {}: не удалось распарсить frontmatter (повреждён?)",
+            path.display()
+        )
+        .into());
+    }
     let body = &content[body_start..];
     for (k, v) in set {
         fm_set(&mut pairs, k, v);
@@ -215,9 +263,15 @@ fn promote_queued_to_ready(
 
 // ---------- Mock workers ----------
 
-fn make_claim(owner: &str) -> Vec<(String, String)> {
+/// Lease per role. Claim-lease ДОЛЖЕН быть ≥ соответствующего session-lease, иначе claim
+/// задачи протухает, пока живой воркер ещё держит её (риск кражи/двойного exec в M3).
+const PLAN_LEASE_SEC: i64 = 300;
+const EXEC_LEASE_SEC: i64 = 900;
+const REVIEW_LEASE_SEC: i64 = 300;
+
+fn make_claim(owner: &str, lease_sec: i64) -> Vec<(String, String)> {
     let now = chrono::Utc::now();
-    let lease_until = now + chrono::Duration::seconds(300);
+    let lease_until = now + chrono::Duration::seconds(lease_sec);
     claim_fields_set(owner, &now.to_rfc3339(), &lease_until.to_rfc3339())
 }
 
@@ -236,13 +290,13 @@ fn mock_plan(
 
     // Claim
     let mid_claim = journal::record_mutation(run_dir, "plan-claim", task_id, None)?;
-    let claim = make_claim("mock-planner");
+    let claim = make_claim("mock-planner", PLAN_LEASE_SEC);
     apply_set(&task.path, &claim)?;
     journal::mark_mutation_applied(run_dir, &mid_claim)?;
 
     // Session
     let sess_id = session::session_new(
-        paths, task_id, "plan", "mock", &task.scope, &run_dir.to_string_lossy(), None, None, 300,
+        paths, task_id, "plan", "mock", &task.scope, &run_dir.to_string_lossy(), None, None, PLAN_LEASE_SEC as u64,
     )?;
 
     // Transition intake → queued
@@ -274,14 +328,14 @@ fn mock_exec(
 
     // Claim + set in-progress
     let mid_claim = journal::record_mutation(run_dir, "exec-claim", task_id, None)?;
-    let mut claim = make_claim("mock-exec");
+    let mut claim = make_claim("mock-exec", EXEC_LEASE_SEC);
     claim.push(("status".to_owned(), "in-progress".to_owned()));
     apply_set(&task.path, &claim)?;
     journal::mark_mutation_applied(run_dir, &mid_claim)?;
 
     // Session
     let sess_id = session::session_new(
-        paths, task_id, "exec", "mock", &task.scope, &run_dir.to_string_lossy(), None, None, 900,
+        paths, task_id, "exec", "mock", &task.scope, &run_dir.to_string_lossy(), None, None, EXEC_LEASE_SEC as u64,
     )?;
 
     // Transition in-progress → in-review
@@ -313,13 +367,13 @@ fn mock_review(
 
     // Claim (status stays in-review while review is running)
     let mid_claim = journal::record_mutation(run_dir, "review-claim", task_id, None)?;
-    let claim = make_claim("mock-reviewer");
+    let claim = make_claim("mock-reviewer", REVIEW_LEASE_SEC);
     apply_set(&task.path, &claim)?;
     journal::mark_mutation_applied(run_dir, &mid_claim)?;
 
     // Session
     let sess_id = session::session_new(
-        paths, task_id, "review", "mock", &task.scope, &run_dir.to_string_lossy(), None, None, 300,
+        paths, task_id, "review", "mock", &task.scope, &run_dir.to_string_lossy(), None, None, REVIEW_LEASE_SEC as u64,
     )?;
 
     // Transition in-review → done (mock: always pass, risk=low)
@@ -342,19 +396,6 @@ fn mock_review(
 }
 
 // ---------- STATUS.md update ----------
-
-fn inject_section(content: &str, header: &str, new_section: &str) -> String {
-    let needle = format!("\n{header}");
-    if let Some(start) = content.find(&needle) {
-        let before = &content[..start + 1];
-        let rest = &content[start + 1..];
-        let skip = 2; // past "##"
-        let end = rest[skip..].find("\n##").map(|i| i + skip + 1).unwrap_or(rest.len());
-        format!("{}{}\n", before, new_section) + &rest[end..]
-    } else {
-        format!("{}\n\n{}\n", content.trim_end(), new_section)
-    }
-}
 
 fn render_sessions_section(sessions: &[session::SessionEntry]) -> String {
     if sessions.is_empty() {
@@ -391,10 +432,10 @@ fn update_status_md(
     let m = metrics::compute(&paths.hq, 20);
     let content = metrics::render_status(&content, &m, 20);
 
-    // Inject/replace sessions section
+    // Inject/replace sessions section (идемпотентно, через тот же helper, что и метрики)
     let sessions = session::list_active(paths);
     let sessions_md = render_sessions_section(&sessions);
-    let content = inject_section(&content, "## Активные сессии", &sessions_md);
+    let content = metrics::replace_section(&content, "## Активные сессии", &sessions_md);
 
     // Write atomically
     let tmp = PathBuf::from(format!("{}.{}.tmp", paths.status.display(), std::process::id()));
@@ -435,7 +476,7 @@ fn init_tick_json(
     });
     let path = run_dir.join("tick.json");
     let json = serde_json::to_string_pretty(&v)?;
-    let tmp = run_dir.join("tick.json.tmp");
+    let tmp = run_dir.join(format!("tick.json.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &json)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
@@ -465,10 +506,11 @@ pub fn run(hq: PathBuf, args: TickArgs) -> Result<(), Box<dyn std::error::Error>
         println!("gc: архивировано {stale} stale-сессий");
     }
 
-    // 3. Create run dir + tick.json
+    // 3. Create run dir + tick.json. Миллисекунды (%3f) в run_id исключают коллизию двух
+    //    тиков одного процесса в одну секунду (перезапись tick.json другого прогона).
     let run_id = format!(
         "TICK-{}-{}",
-        chrono::Utc::now().format("%Y-%m-%d_%H-%M-%S"),
+        chrono::Utc::now().format("%Y-%m-%d_%H-%M-%S-%3f"),
         std::process::id()
     );
     let run_dir = paths.runs.join(&run_id);
@@ -507,8 +549,14 @@ pub fn run(hq: PathBuf, args: TickArgs) -> Result<(), Box<dyn std::error::Error>
                 planned += 1;
             }
 
-            // Exec phase (use updated in-memory tasks after promote)
-            let exec_candidates: Vec<_> = dispatch::select_for_dispatch(&tasks, "ready", exec_slots, args.max_per_repo).into_iter().cloned().collect();
+            // Exec phase (use updated in-memory tasks after promote). Доп. защита: повторно
+            // проверяем deps_done — `done` терминален, поэтому это «ремни безопасности», но
+            // дёшево и закрывает гонку, если граф зависимостей правят между тиками.
+            let exec_candidates: Vec<_> = dispatch::select_for_dispatch(&tasks, "ready", exec_slots, args.max_per_repo)
+                .into_iter()
+                .filter(|t| dispatch::task_deps_done(t, &tasks))
+                .cloned()
+                .collect();
             let mut execed = 0usize;
             for task in &exec_candidates {
                 mock_exec(&paths, task, &run_dir)?;

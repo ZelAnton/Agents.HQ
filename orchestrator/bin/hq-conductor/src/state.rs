@@ -142,3 +142,54 @@ pub fn current_hostname() -> String {
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_default()
 }
+
+/// Абсолютный потолок: если lease просрочен больше чем на это время, ресурс
+/// освобождается ДАЖЕ если PID выглядит живым (защита от переиспользования PID
+/// мёртвого прогона живым процессом — иначе задача/сессия зависает навсегда).
+pub const FORCE_RELEASE_GRACE_SEC: i64 = 3 * 3600;
+
+/// Единая логика «владелец lease мёртв → ресурс можно забрать». Используется и для
+/// claim задач (dispatch::task_is_free), и для сессий (session::gc), чтобы они не
+/// расходились. Семантика:
+/// - тот же хост + PID точно мёртв → забрать сразу (быстрое восстановление после краха);
+/// - тот же хост + PID жив (возможно переиспользован) → только после lease + FORCE_GRACE;
+/// - тот же хост без PID → по истечении lease;
+/// - другой хост (PID не проверить, fail-closed) → только после lease + FORCE_GRACE;
+/// - claimed, но lease отсутствует, и владелец не подтверждён мёртвым → НЕ забирать.
+pub fn owner_reclaimable(
+    owner_host: &str,
+    owner_pid: Option<u32>,
+    lease_until: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    let now = chrono::Utc::now();
+    let same_host = owner_host.eq_ignore_ascii_case(&current_hostname());
+
+    // Проверяем PID РОВНО ОДИН раз (каждый is_pid_alive порождает `tasklist`), кешируем:
+    // Some(true)=жив · Some(false)=мёртв · None=не проверяли (другой хост или нет PID).
+    let pid_alive: Option<bool> = if same_host { owner_pid.map(is_pid_alive) } else { None };
+
+    // Быстрый путь: на своём хосте PID точно мёртв → забрать немедленно (без ожидания lease).
+    if pid_alive == Some(false) {
+        return true;
+    }
+
+    match lease_until {
+        Some(lease) => {
+            let force = now > lease + chrono::Duration::seconds(FORCE_RELEASE_GRACE_SEC);
+            if same_host {
+                if pid_alive == Some(true) {
+                    // PID выглядит живым (мог быть переиспользован) → только по force-grace
+                    force
+                } else {
+                    // same_host, но PID не задан → доверяем таймауту lease
+                    now > lease
+                }
+            } else {
+                // другой хост → не можем проверить → fail-closed до force-grace
+                force
+            }
+        }
+        // claimed, но lease нет; мёртвый PID уже обработан выше → fail-closed
+        None => false,
+    }
+}

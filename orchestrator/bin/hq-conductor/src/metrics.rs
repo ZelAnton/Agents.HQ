@@ -196,6 +196,40 @@ pub fn compute(hq: &Path, window: usize) -> Metrics {
     }
 }
 
+/// Заменяет (или дописывает) markdown-секцию, начинающуюся со строки `header_prefix`
+/// (например `## Метрики`), на `new_section` (его первая строка — полный заголовок).
+/// Идемпотентна: повторный вызов на своём же выводе даёт тот же результат. Сохраняет
+/// разделитель (пустую строку) перед следующей секцией. Корректно обрабатывает заголовок
+/// в самом начале файла (без ведущего `\n`).
+///
+/// ИНВАРИАНТ: `new_section` НЕ должен содержать строк, начинающихся с `## `, кроме самого
+/// заголовка — иначе следующий вызов воспримет внутренний `## ` за границу секции и
+/// продублирует хвост (идемпотентность сломается). Все штатные вызовы (метрики: строки `- `;
+/// сессии: строки таблицы `| |`) этому удовлетворяют.
+pub fn replace_section(content: &str, header_prefix: &str, new_section: &str) -> String {
+    let start = if content.starts_with(header_prefix) {
+        Some(0)
+    } else {
+        content.find(&format!("\n{header_prefix}")).map(|i| i + 1)
+    };
+    let Some(start) = start else {
+        // не найдено → дописать в конец с пустой строкой-разделителем
+        return format!("{}\n\n{}\n", content.trim_end(), new_section.trim_end());
+    };
+    // Найти начало следующей секции (строка, начинающаяся с "## ") после текущего заголовка.
+    let search_from = start + header_prefix.len();
+    let next = content[search_from..].find("\n## ").map(|i| search_from + i);
+    let mut out = String::new();
+    out.push_str(&content[..start]); // всё до заголовка (его \n-разделитель уже здесь)
+    out.push_str(new_section.trim_end());
+    out.push('\n');
+    if let Some(n) = next {
+        out.push('\n'); // пустая строка-разделитель перед следующей секцией
+        out.push_str(content[n..].trim_start_matches('\n'));
+    }
+    out
+}
+
 /// Заменяет секцию `## Метрики` в содержимом STATUS.
 pub fn render_status(content: &str, m: &Metrics, window: usize) -> String {
     let section = format!(
@@ -211,16 +245,7 @@ pub fn render_status(content: &str, m: &Metrics, window: usize) -> String {
         fmt_pct(m.revert_pct),
         fmt_pct(m.auto_land_pct),
     );
-
-    // Найти \n## Метрики и заменить всю секцию до следующего \n## (или конца)
-    if let Some(start) = content.find("\n## Метрики") {
-        let before = &content[..start + 1]; // включая \n перед ##
-        let rest = &content[start + 1..];
-        let end = rest[2..].find("\n##").map(|i| i + 3).unwrap_or(rest.len());
-        format!("{}{}\n", before, section) + &rest[end..]
-    } else {
-        format!("{}\n{}\n", content.trim_end(), section)
-    }
+    replace_section(content, "## Метрики", &section)
 }
 
 /// Атомарная запись: write to .tmp, rename.
