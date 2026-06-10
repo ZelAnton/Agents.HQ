@@ -148,10 +148,16 @@ $testCmd = Fm1 $taskText 'test_cmd';  if (-not $testCmd) { $testCmd = 'cargo tes
 $autonomy = if ($Autonomy) { $Autonomy } else { Get-Autonomy $repo }
 Write-Host "=== LAND repo=$repo ws=$ws autonomy=$autonomy ==="
 
-# change_id рабочей копии workspace (стабилен при rebase)
-$change = (& { Push-Location $repoPath; try { (jj log --no-pager -r "${ws}@" --no-graph -T 'change_id.short()' 2>$null | Out-String).Trim() } finally { Pop-Location } })
+# change приземления: из summary (P5 integrate даёт integ_tip), иначе из @ workspace (P4 одиночная задача)
+if ($sum.change) {
+  $change = [string]$sum.change
+} else {
+  $change = (& { Push-Location $repoPath; try { (jj log --no-pager -r "${ws}@" --no-graph -T 'change_id.short()' 2>$null | Out-String).Trim() } finally { Pop-Location } })
+}
 if (-not $change) { throw "не нашёл change для workspace $ws (ws жива?)" }
 $change = ($change -split '\r?\n')[0]
+# range_base: P5 integrate приземляет ЦЕПОЧКУ Base..change (несколько изменений); P4 — одиночное (-r change)
+$rangeBase = if ($sum.range_base) { [string]$sum.range_base } else { $null }
 
 # ---------- 1) ИНТЕГРАЦИЯ: fetch + (rebase на свежий main@origin при сдвиге) ----------
 $integrationNote = @()
@@ -161,22 +167,39 @@ try {
 } finally { Pop-Location }
 $baseRev = if (Rev-Commit $repoPath "main@$Remote") { "main@$Remote" } else { 'main' }
 $baseCommit = Rev-Commit $repoPath $baseRev
-$parentCommit = Rev-Commit $repoPath "${change}-"
-if ($baseCommit -and $parentCommit -and ($baseCommit -ne $parentCommit)) {
-  $integrationNote += "main сдвинулся ($parentCommit→$baseCommit) — rebase изменения на $baseRev"
+# P5 chain: rebase от корня цепочки, чтобы не потерять промежуточные изменения
+$rebaseFrom = $change
+if ($rangeBase) {
   Push-Location $repoPath
-  try { jj rebase -s $change -d $baseRev 2>&1 | Out-String | Write-Verbose } finally { Pop-Location }
+  try {
+    $rootLine = (jj log --no-pager -r "roots($rangeBase..$change)" --no-graph -T 'change_id.short()' 2>$null | Out-String).Trim()
+    if ($rootLine) { $rebaseFrom = ($rootLine -split '\r?\n')[0] }
+  } finally { Pop-Location }
+}
+$parentCommit = Rev-Commit $repoPath "${rebaseFrom}-"
+if ($baseCommit -and $parentCommit -and ($baseCommit -ne $parentCommit)) {
+  $integrationNote += "main сдвинулся ($parentCommit→$baseCommit) — rebase цепочки на $baseRev"
+  Push-Location $repoPath
+  try { jj rebase -s $rebaseFrom -d $baseRev 2>&1 | Out-String | Write-Verbose } finally { Pop-Location }
 } else { $integrationNote += "main не двигался — интеграция без rebase" }
 
+# диапазон изменения: P5 — Base..change (вся цепочка), P4 — само change
+$confRevset = if ($rangeBase) { "($rangeBase..$change) & conflicts()" } else { "$change & conflicts()" }
+
 # ---------- 2) ЖЁСТКИЙ ГЕЙТ §11.3: нет нерешённых jj-конфликтов ----------
-$conflicted = Rev-Commit $repoPath "($change | conflicts()) & conflicts()"
+$conflicted = Rev-Commit $repoPath $confRevset
 $hasConflict = [bool]$conflicted
 
 # ---------- 3) собрать diff/файлы изменения (после интеграции) ----------
 Push-Location $repoPath
 try {
-  $diffSummary = (jj diff --no-pager -r $change --summary 2>&1 | Out-String)
-  $diffText = (jj diff --no-pager -r $change --git 2>&1 | Out-String)
+  if ($rangeBase) {
+    $diffSummary = (jj diff --no-pager --from $rangeBase --to $change --summary 2>&1 | Out-String)
+    $diffText = (jj diff --no-pager --from $rangeBase --to $change --git 2>&1 | Out-String)
+  } else {
+    $diffSummary = (jj diff --no-pager -r $change --summary 2>&1 | Out-String)
+    $diffText = (jj diff --no-pager -r $change --git 2>&1 | Out-String)
+  }
   $isEmpty = ((jj log --no-pager -r $change --no-graph -T 'empty' 2>$null | Out-String).Trim() -eq 'true')
 } finally { Pop-Location }
 $changedFiles = @($diffSummary -split '\r?\n' | Where-Object { $_ -match '^\s*[A-Z]\s+(.+)$' } | ForEach-Object { ($_ -replace '^\s*[A-Z]\s+', '').Trim() })
@@ -221,7 +244,7 @@ if ($verify) { $verify | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $RunD
 # ---------- 6) risk() — детерминированно, FAIL-CLOSED (§11.1/§11.2/§11.3) ----------
 $execOutOfScope = @($sum.out_of_scope)
 $verifyOutOfScope = @($verify.out_of_scope)
-$conflictsResolved = @()   # P4: слияний нет (конфликт ⇒ DEC). Поле для P5.
+$conflictsResolved = @($sum.conflicts_resolved)   # P5 integrate: непусто ⇒ не-low ⇒ DEC (§11.2). P4: пусто.
 $reasons = @()
 if ($isEmpty) { $reasons += 'изменение пустое' }
 if ($hasConflict) { $reasons += 'есть нерешённые jj-конфликты (§11.3)' }

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hq/orchestrator/merge",
+  "title": "hq-merge output",
+  "description": "Результат Merge-агента: разрешение jj-конфликтов при инкрементальной интеграции (фаза P5). Контракт — IMPLEMENTATION §1.4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["integrated", "conflicts_resolved", "tests", "needs_human"],
+  "properties": {
+    "integrated": {
+      "type": "boolean",
+      "description": "true ⇔ все конфликты сняты (нет маркеров, jj resolve --list пуст) и намерение обеих сторон сохранено."
+    },
+    "conflicts_resolved": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Пути файлов, в которых были и сняты конфликты. Непусто ⇒ интеграция НЕ-low (§11.2) ⇒ land только через DEC."
+    },
+    "tests": {
+      "enum": ["pass", "fail", "skipped"],
+      "description": "Итог тестов после разрешения. skipped трактуется как НЕ-зелёный (§11.3)."
+    },
+    "needs_human": {
+      "type": "boolean",
+      "description": "true ⇔ разрешение неоднозначно/рискованно/невозможно без потери намерения — эскалация в DEC; конфликт НЕ снимать силой."
+    },
+    "both_sides_present": {
+      "type": ["boolean", "null"],
+      "description": "Подтверждение, что в резолюции присутствует намерение ОБЕИХ сторон (§11.2). false/null при сомнении ⇒ needs_human."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Кратко (RU): что конфликтовало и как разрешено (или почему needs_human)."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "needs_human": { "const": true } } },
+      "then": { "properties": { "integrated": { "const": false } } }
+    }
+  ]
+}

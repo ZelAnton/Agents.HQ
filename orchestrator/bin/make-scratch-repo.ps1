@@ -13,7 +13,8 @@
 param(
   [string]$Name,
   [switch]$Force,
-  [switch]$Remove
+  [switch]$Remove,
+  [switch]$Modules   # P5: добавить src/{alpha,beta,shared}.rs для непересекающихся/пересекающихся областей
 )
 $ErrorActionPreference = 'Stop'
 $Bin = $PSScriptRoot
@@ -56,6 +57,54 @@ try {
   cargo init --lib --name hq_scratch --vcs none 2>&1 | Out-Null
   # .gitignore ДО первого снапшота: иначе jj затащит target/ (build-артефакты с абсолютными путями)
   Set-Content (Join-Path $repoPath '.gitignore') "/target`n/Cargo.lock`n"
+
+  if ($Modules) {
+    $src = Join-Path $repoPath 'src'
+    Set-Content (Join-Path $src 'lib.rs') @"
+pub mod alpha;
+pub mod beta;
+pub mod shared;
+
+pub fn add(left: u64, right: u64) -> u64 { left + right }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn it_works() { assert_eq!(add(2, 2), 4); }
+}
+"@
+    Set-Content (Join-Path $src 'alpha.rs') @"
+pub fn alpha_base() -> i32 { 0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn base() { assert_eq!(alpha_base(), 0); }
+}
+"@
+    Set-Content (Join-Path $src 'beta.rs') @"
+pub fn beta_base() -> i32 { 0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn base() { assert_eq!(beta_base(), 0); }
+}
+"@
+    Set-Content (Join-Path $src 'shared.rs') @"
+pub fn tag() -> &'static str { "shared" }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn tag_works() { assert_eq!(tag(), "shared"); }
+}
+"@
+  }
 
   # 3) jj-репо поверх + начальный коммит main + remote + push
   jj git init 2>&1 | Out-Null
