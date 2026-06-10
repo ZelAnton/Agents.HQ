@@ -224,14 +224,6 @@ pub fn gc_stale_sessions(paths: &Paths) -> Result<u32, Box<dyn std::error::Error
     Ok(stale_count)
 }
 
-/// Count active sessions with the given role.
-pub fn count_active_by_role(paths: &Paths, role: &str) -> usize {
-    list_active(paths)
-        .iter()
-        .filter(|(_, _, pairs)| fm_get(pairs, "role").as_deref() == Some(role))
-        .count()
-}
-
 // ---------- command handler ----------
 
 pub fn run(hq: PathBuf, args: SessionArgs) -> Result<(), Box<dyn std::error::Error>> {

@@ -162,6 +162,16 @@ fn write_task_fm(
 
 const CLAIM_FIELDS: &[&str] = &["claimed-at", "lease-until", "owner-pid", "owner-host"];
 
+/// Очистить in-memory зеркало claim после того, как на диске поля claim удалены
+/// (write_task_fm с CLAIM_FIELDS в remove + assigned-to:null). Держит in-memory снимок
+/// согласованным с диском, чтобы последующий task_is_free коротко замкнул на assigned_to=None.
+fn clear_claim_mirror(task: &mut TaskInfo) {
+    task.assigned_to = None;
+    task.lease_until = None;
+    task.owner_pid = None;
+    task.owner_host.clear();
+}
+
 fn claim_fields_set(owner: &str, now: &str, lease_until: &str) -> Vec<(String, String)> {
     vec![
         ("assigned-to".to_owned(), owner.to_owned()),
@@ -197,10 +207,7 @@ fn revert_stale_in_progress(
         // гоняет owner_reclaimable (лишний tasklist) по устаревшим полям, и есть узкое окно,
         // где переиспользованный PID сделает только что освобождённую задачу «занятой».
         task.status = "ready".to_owned();
-        task.assigned_to = None;
-        task.lease_until = None;
-        task.owner_pid = None;
-        task.owner_host.clear();
+        clear_claim_mirror(task);
         journal::mark_mutation_applied(run_dir, &mid)?;
         println!("  recovery: {} in-progress → ready (stale claim)", task.id);
     }
@@ -230,10 +237,7 @@ fn release_stale_dispatch_claims(
         }
         let mid = journal::record_mutation(run_dir, "recovery-release-claim", &task.id, None)?;
         write_task_fm(&task.path, &[("assigned-to", "null")], CLAIM_FIELDS)?;
-        task.assigned_to = None;
-        task.lease_until = None;
-        task.owner_pid = None;
-        task.owner_host.clear();
+        clear_claim_mirror(task);
         journal::mark_mutation_applied(run_dir, &mid)?;
         println!("  recovery: {} — released stale claim ({})", task.id, task.status);
     }
@@ -247,16 +251,20 @@ fn requeue_fix_needed(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for task in tasks.iter_mut() {
         if task.status != "fix-needed" { continue; }
+        // Любой переход из fix-needed снимает claim предыдущего (мёртвого) воркера —
+        // как revert_stale_in_progress. Иначе задача уходит в ready с протухшим claim
+        // (лишний tasklist + окно reused-PID при ре-диспатче). Зеркалим и в памяти.
         if task.fix_attempt < FIX_MAX {
             let new_attempt = (task.fix_attempt + 1).to_string();
             let mid = journal::record_mutation(run_dir, "fix-requeue", &task.id, None)?;
             write_task_fm(
                 &task.path,
-                &[("status", "ready"), ("fix-attempt", &new_attempt)],
-                &[],
+                &[("status", "ready"), ("fix-attempt", &new_attempt), ("assigned-to", "null")],
+                CLAIM_FIELDS,
             )?;
             task.fix_attempt += 1;
             task.status = "ready".to_owned();
+            clear_claim_mirror(task);
             journal::mark_mutation_applied(run_dir, &mid)?;
             println!("  fix-requeue: {} → ready (attempt {})", task.id, task.fix_attempt);
         } else {
@@ -264,10 +272,11 @@ fn requeue_fix_needed(
             let mid = journal::record_mutation(run_dir, "fix-escalate", &task.id, None)?;
             write_task_fm(
                 &task.path,
-                &[("status", "escalated"), ("blocked-reason", &reason)],
-                &[],
+                &[("status", "escalated"), ("blocked-reason", &reason), ("assigned-to", "null")],
+                CLAIM_FIELDS,
             )?;
             task.status = "escalated".to_owned();
+            clear_claim_mirror(task);
             journal::mark_mutation_applied(run_dir, &mid)?;
             println!("  fix-escalate: {} → escalated (≥{FIX_MAX} attempts)", task.id);
         }
@@ -588,13 +597,17 @@ pub fn run(hq: PathBuf, args: TickArgs) -> Result<(), Box<dyn std::error::Error>
     // 6. Promote queued → ready
     promote_queued_to_ready(&mut tasks, &run_dir)?;
 
-    // 7. Slot counts
-    let plan_active = session::count_active_by_role(&paths, "plan");
-    let exec_active = session::count_active_by_role(&paths, "exec");
-    let review_active = session::count_active_by_role(&paths, "review");
-    let plan_slots = args.max_plan.saturating_sub(plan_active);
-    let exec_slots = args.max_exec.saturating_sub(exec_active);
-    let review_slots = args.max_review.saturating_sub(review_active);
+    // 7. Slot counts — один проход по активным сессиям (а не три отдельных скана).
+    let active_sessions = session::list_active(&paths);
+    let count_role = |role: &str| {
+        active_sessions
+            .iter()
+            .filter(|(_, _, p)| fm_get(p, "role").as_deref() == Some(role))
+            .count()
+    };
+    let plan_slots = args.max_plan.saturating_sub(count_role("plan"));
+    let exec_slots = args.max_exec.saturating_sub(count_role("exec"));
+    let review_slots = args.max_review.saturating_sub(count_role("review"));
 
     // 8. Dispatch (mode=mock uses in-process workers; M3 will spawn real agents)
     match args.mode {
