@@ -10,7 +10,10 @@
 param(
   [Parameter(Mandatory)][string]$Task,
   [Parameter(Mandatory)][string]$RunDir,
-  [string]$Model = 'sonnet'
+  [string]$Model = 'sonnet',
+  # Опц. файл с замечаниями прошлого ревью (re-exec после fix-needed) — инжектится в промпт,
+  # чтобы исполнитель устранил конкретные претензии, а не повторил ту же ошибку вслепую.
+  [string]$FixHint = ''
 )
 $ErrorActionPreference = 'Stop'
 $Bin = $PSScriptRoot
@@ -72,10 +75,20 @@ try {
 if (-not (Test-Path $dest)) { throw "workspace не создан: $dest" }
 
 # 2) исполнитель
+$fixBlock = ''
+if ($FixHint -and (Test-Path $FixHint)) {
+  $hintText = Get-Content -Raw $FixHint
+  $fixBlock = @"
+
+## ВАЖНО: это повторная попытка после провала ревью
+Прошлая версия НЕ прошла ревью. Устрани следующие замечания (это приоритет №1):
+$hintText
+"@
+}
 $inp = @"
 Подзадача (исполни в ТЕКУЩЕЙ рабочей копии = корень workspace):
 $body
-
+$fixBlock
 Область (scope_paths), только эти пути: $($scopePaths -join ', ')
 Команды гейта: build = '$buildCmd'; test = '$testCmd'.
 Сделай изменение в пределах области, прогони build и test, выполни jj describe -m "<кратко>",

@@ -19,7 +19,6 @@ fix-attempt: 0
 session: null
 blocked-reason: null
 review: pass
-run-dir: D:\GitHub\Personal\.hq\orchestrator\_runs\TICK-2026-06-10_19-03-54-525-36680\exec-TASK-0020
 ---
 
 ## Цель

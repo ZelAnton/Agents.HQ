@@ -120,14 +120,29 @@ pub fn session_new(
     lease_sec: u64,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let now = chrono::Utc::now();
-    let run_basename_raw = Path::new(run_dir)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("run");
+    // Уникальный токен прогона для session-id. Одной только basename run_dir НЕ хватает:
+    // live-воркеры передают per-роль-подкаталог тика (`…/TICK-xxx/exec-TASK-0020`), чей
+    // file_name() = `exec-TASK-0020` ПОВТОРЯЕТСЯ каждый тик. Тогда re-exec/re-review той же
+    // задачи в разных тиках дают ОДИНАКОВЫЙ id → session_end перезапишет архив прошлого тика
+    // (потеря аудита). Если leaf уже tick-id (`TICK-…`, mock-путь передаёт сам tick-dir) —
+    // берём его как есть (id не меняется). Иначе подставляем имя родителя (tick-dir), чтобы
+    // id нёс run-id тика и никогда не коллизил. Родителя `_runs` (корень) не подставляем.
+    let run_token = {
+        let p = Path::new(run_dir);
+        let leaf = p.file_name().and_then(|s| s.to_str()).unwrap_or("run");
+        if leaf.starts_with("TICK-") {
+            leaf.to_owned()
+        } else {
+            match p.parent().and_then(|x| x.file_name()).and_then(|s| s.to_str()) {
+                Some(parent) if !parent.is_empty() && parent != "_runs" => format!("{parent}-{leaf}"),
+                _ => leaf.to_owned(),
+            }
+        }
+    };
     // Гарантируем непустые части, иначе id нарушит pattern схемы
     // (^SESS-TASK-[0-9A-Za-z-]+-[0-9A-Za-z-]+$): пустой run_dir/таск → фолбэк.
     let run_basename = {
-        let s = sanitize_id_part(run_basename_raw);
+        let s = sanitize_id_part(&run_token);
         if s.is_empty() { "run".to_owned() } else { s }
     };
     let task_short = {

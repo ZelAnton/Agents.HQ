@@ -516,6 +516,40 @@ fn read_task_field(path: &Path, key: &str) -> Option<String> {
     fm_get(&pairs, key).filter(|v| v != "null" && !v.is_empty())
 }
 
+/// CLAIM_FIELDS + один доп. ключ для удаления (например `run-dir` на терминальном переходе).
+fn claim_fields_plus(extra: &str) -> Vec<&str> {
+    CLAIM_FIELDS.iter().copied().chain(std::iter::once(extra)).collect()
+}
+
+/// Стабильный (по task-id) путь sidecar-файла с замечаниями ревью. Лежит в gitignored
+/// `_runs/fix-feedback/` — НЕ коммитится. Пишется при review→fix-needed, читается re-exec'ом.
+fn fix_feedback_path(runs: &Path, task_id: &str) -> PathBuf {
+    runs.join("fix-feedback").join(format!("{task_id}.md"))
+}
+
+/// Записать замечания Верификатора в sidecar, чтобы СЛЕДУЮЩИЙ re-exec был информированным.
+/// Без этого fix-loop гоняет один и тот же вход N раз (новый workspace от main, без фидбэка) →
+/// тот же провал → впустую жжёт LLM до escalate. Best-effort: ошибка записи не валит тик.
+fn write_fix_feedback(runs: &Path, task_id: &str, next_attempt: u32, verify: Option<&worker::VerifyResult>) {
+    let Some(v) = verify else { return };
+    let mut s = format!("# Замечания прошлого ревью (попытка {next_attempt}) — устрани их\n\n");
+    if !v.summary.is_empty() {
+        s.push_str(&format!("Вывод ревьюера: {}\n\n", v.summary));
+    }
+    if v.findings.is_empty() {
+        s.push_str(&format!("verdict={}, dod_met={} (детальных замечаний нет)\n", v.verdict, v.dod_met));
+    } else {
+        for f in &v.findings {
+            s.push_str(&format!("- [{}] {}\n", f.sev, f.msg));
+        }
+    }
+    let path = fix_feedback_path(runs, task_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, s);
+}
+
 /// PLAN phase: intake → queued | rejected | escalated (via plan-one.ps1).
 fn run_plan_phase(
     paths: &Paths,
@@ -606,16 +640,22 @@ fn run_exec_phase(
             paths, &task.id, "exec", &args.exec_model, &task.scope,
             &per.to_string_lossy(), None, None, EXEC_LEASE_SEC as u64,
         )?;
-        jobs.push(pwsh_job(
-            format!("exec-{}", task.id),
-            &script,
-            &[
-                "-Task".to_owned(), task.path.display().to_string(),
-                "-RunDir".to_owned(), per.display().to_string(),
-                "-Model".to_owned(), args.exec_model.clone(),
-            ],
-            args.worker_timeout_sec,
-        ));
+        let mut extra = vec![
+            "-Task".to_owned(), task.path.display().to_string(),
+            "-RunDir".to_owned(), per.display().to_string(),
+            "-Model".to_owned(), args.exec_model.clone(),
+        ];
+        // Информированный повтор: если это re-exec после fix-needed (fix_attempt>0) и есть
+        // sidecar с замечаниями прошлого ревью — передаём его исполнителю, чтобы он устранил
+        // конкретные претензии, а не повторял ту же ошибку вслепую.
+        if task.fix_attempt > 0 {
+            let fb = fix_feedback_path(&paths.runs, &task.id);
+            if fb.exists() {
+                extra.push("-FixHint".to_owned());
+                extra.push(fb.display().to_string());
+            }
+        }
+        jobs.push(pwsh_job(format!("exec-{}", task.id), &script, &extra, args.worker_timeout_sec));
         meta.push((task, sess, per, jid));
     }
     let batch = worker::run_batch(spawn_bin, &jobs, args.max_exec, &run_dir.join("exec-batch"))?;
@@ -710,19 +750,26 @@ fn run_review_phase(
         let outcome = decide_review(paths, args, task, verify.as_ref(), &ctx, summary.as_ref(), bin, spawn_bin)?;
         match outcome {
             ReviewOutcome::Done => {
+                // run-dir удаляем: задача терминальна, поле указывало на ephemeral _runs
+                // (gitignored, машинно-абсолютный путь) — не держим его в trackedFM. Заодно
+                // чистим sidecar обратной связи fix-loop'а (если был).
                 write_task_fm(&task.path, &[("status", "done"), ("assigned-to", "null"),
-                    ("review", "pass"), ("risk", "low")], CLAIM_FIELDS)?;
+                    ("review", "pass"), ("risk", "low")], &claim_fields_plus("run-dir"))?;
+                let _ = std::fs::remove_file(fix_feedback_path(&paths.runs, &task.id));
                 session::session_end(paths, &sess, "done", Some("review pass + low → landed → done"))?;
                 println!("  review: {} → done (auto-landed)", task.id);
             }
             ReviewOutcome::FixNeeded => {
+                // Сохраняем замечания для следующего (информированного) re-exec'а.
+                write_fix_feedback(&paths.runs, &task.id, task.fix_attempt + 1, verify.as_ref());
                 write_task_fm(&task.path, &[("status", "fix-needed"), ("assigned-to", "null")], CLAIM_FIELDS)?;
                 session::session_end(paths, &sess, "done", Some("review fail → fix-needed"))?;
                 println!("  review: {} → fix-needed (verify fail)", task.id);
             }
             ReviewOutcome::Escalated(dec) => {
                 write_task_fm(&task.path, &[("status", "escalated"), ("assigned-to", "null"),
-                    ("review", "escalated"), ("blocked-reason", &dec)], CLAIM_FIELDS)?;
+                    ("review", "escalated"), ("blocked-reason", &dec)], &claim_fields_plus("run-dir"))?;
+                let _ = std::fs::remove_file(fix_feedback_path(&paths.runs, &task.id));
                 session::session_end(paths, &sess, "done", Some(&format!("review → escalated ({dec})")))?;
                 println!("  review: {} → escalated ({dec})", task.id);
             }
