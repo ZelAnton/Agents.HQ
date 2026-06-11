@@ -1,0 +1,7 @@
+{
+  "paused": false,
+  "max_plan": 1,
+  "max_exec": 2,
+  "max_review": 1,
+  "autonomy": "auto-low"
+}

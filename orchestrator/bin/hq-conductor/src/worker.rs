@@ -3,7 +3,7 @@
 //! structured result file and decides the next state. Risk assessment and DEC creation
 //! live here (Rust owns routing; land.ps1 is NOT modified — isolation per M3 decision).
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
 // ---------- hq-spawn job protocol ----------
@@ -15,10 +15,22 @@ pub struct Job {
     pub timeout_sec: u64,
 }
 
+/// hq-spawn writes `"code": null` for timed-out or spawn-error jobs.
+/// Treat null as -1 (conventional "no exit code") to avoid deserialization failure.
+fn de_nullable_i32<'de, D: Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    Ok(Option::<i32>::deserialize(d)?.unwrap_or(-1))
+}
+
+/// PowerShell's ConvertTo-Json serializes empty arrays `@()` as `null` in some
+/// contexts. Treat null as an empty Vec to avoid deserialization failure.
+fn de_nullable_vec<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(Option::<Vec<String>>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Deserialize, Debug, Default, Clone)]
 pub struct JobResult {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_nullable_i32")]
     pub code: i32,
     #[serde(default)]
     pub success: bool,
@@ -103,9 +115,9 @@ pub struct ExecSummary {
     pub gate_build: bool,
     #[serde(default)]
     pub gate_tests: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_nullable_vec")]
     pub out_of_scope: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_nullable_vec")]
     pub leaks: Vec<String>,
     #[serde(default)]
     pub exec_error: Option<String>,
@@ -123,7 +135,7 @@ pub struct VerifyResult {
     pub verdict: String, // pass | fail
     #[serde(default)]
     pub dod_met: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_nullable_vec")]
     pub out_of_scope: Vec<String>,
     #[serde(default)]
     pub findings: Vec<VerifyFinding>,
@@ -151,7 +163,7 @@ pub fn read_verify(run_dir: &Path) -> Option<VerifyResult> {
 pub struct ReviewContext {
     #[serde(default)]
     pub change: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_nullable_vec")]
     pub changed_files: Vec<String>,
     #[serde(default)]
     pub diff_lines: u64,
@@ -159,7 +171,7 @@ pub struct ReviewContext {
     pub has_conflict: bool,
     #[serde(default)]
     pub is_empty: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_nullable_vec")]
     pub leaks: Vec<String>,
 }
 

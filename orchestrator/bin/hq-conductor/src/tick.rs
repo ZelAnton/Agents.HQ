@@ -210,6 +210,8 @@ fn revert_stale_in_progress(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for task in tasks.iter_mut() {
         if task.status != "in-progress" { continue; }
+        // Human-owned tasks are in-progress without an agent claim by design — skip revert.
+        if dispatch::is_human_owned(task) { continue; }
         if !dispatch::task_is_free(task) { continue; }
         let mid = journal::record_mutation(
             run_dir,
@@ -270,6 +272,8 @@ fn requeue_fix_needed(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for task in tasks.iter_mut() {
         if task.status != "fix-needed" { continue; }
+        // Human-owned задачи recovery не трогает (инвариант is_human_owned): переходы ведёт человек.
+        if dispatch::is_human_owned(task) { continue; }
         // Любой переход из fix-needed снимает claim предыдущего (мёртвого) воркера —
         // как revert_stale_in_progress. Иначе задача уходит в ready с протухшим claim
         // (лишний tasklist + окно reused-PID при ре-диспатче). Зеркалим и в памяти.
@@ -312,7 +316,8 @@ fn promote_queued_to_ready(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Surface «висячие» зависимости: dep-id, которого нет ни в одной задаче (опечатка/удалён).
     // Иначе `task_deps_done` навсегда false → задача молча застревает в queued без сигнала.
-    for t in tasks.iter().filter(|t| t.status == "queued") {
+    // Human-owned задачи пропускаем — их переходы ведёт человек, авто-promote их не трогает.
+    for t in tasks.iter().filter(|t| t.status == "queued" && !dispatch::is_human_owned(t)) {
         let missing: Vec<&str> = t
             .depends_on
             .iter()
@@ -331,7 +336,9 @@ fn promote_queued_to_ready(
     // holding iterator + mutable ref simultaneously in the loop below)
     let to_promote: Vec<usize> = (0..tasks.len())
         .filter(|&i| {
-            tasks[i].status == "queued" && dispatch::task_deps_done(&tasks[i], tasks)
+            tasks[i].status == "queued"
+                && !dispatch::is_human_owned(&tasks[i])
+                && dispatch::task_deps_done(&tasks[i], tasks)
         })
         .collect();
     for idx in to_promote {
@@ -753,8 +760,10 @@ fn decide_review(
     };
     let risk = worker::assess_risk(summary, verify, ctx, args.size_limit);
     if risk.low {
-        // auto-land via land-only.ps1 (jj bookmark move + push). On failure → escalate.
-        let landed = run_land_only(bin, spawn_bin, args, &summary.repo, &ctx.change)?;
+        // auto-land via land-only.ps1 (jj bookmark move + push + workspace cleanup). On failure → escalate.
+        let landed = run_land_only(
+            bin, spawn_bin, args, &summary.repo, &ctx.change, &summary.workspace, &summary.dest,
+        )?;
         if landed {
             return Ok(ReviewOutcome::Done);
         }
@@ -771,13 +780,17 @@ fn decide_review(
     Ok(ReviewOutcome::Escalated(dec.id))
 }
 
-/// Run land-only.ps1 (jj bookmark move main → change; jj git push). Returns true on success.
+/// Run land-only.ps1 (jj bookmark move main → change; jj git push; forget exec workspace).
+/// Returns true on success. `workspace`/`dest` enable post-land cleanup (best-effort in PS).
+#[allow(clippy::too_many_arguments)]
 fn run_land_only(
     bin: &Path,
     spawn_bin: &Path,
     args: &TickArgs,
     repo: &str,
     change: &str,
+    workspace: &str,
+    dest: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let script = bin.join("land-only.ps1");
     let job = pwsh_job(
@@ -787,6 +800,8 @@ fn run_land_only(
             "-Repo".to_owned(), repo.to_owned(),
             "-Change".to_owned(), change.to_owned(),
             "-Remote".to_owned(), "origin".to_owned(),
+            "-Workspace".to_owned(), workspace.to_owned(),
+            "-Dest".to_owned(), dest.to_owned(),
         ],
         args.worker_timeout_sec,
     );
@@ -811,7 +826,25 @@ fn live_dispatch(
 
     let plan_c: Vec<TaskInfo> = dispatch::select_for_dispatch(tasks, "intake", plan_slots, args.max_per_repo)
         .into_iter().cloned().collect();
-    let exec_c: Vec<TaskInfo> = dispatch::select_for_dispatch(tasks, "ready", exec_slots, args.max_per_repo)
+
+    // Autonomy gate (live dispatch — both the assist preview and real auto-low exec):
+    // unattended exec spawns an agent + jj workspace inside the task's repo, so only tasks
+    // whose autonomy explicitly opts into automation are eligible. Fail-closed —
+    // product/orchestrator tasks without `autonomy: auto-low` are skipped (left `ready`),
+    // never auto-executed. (Mock mode dispatches separately and is NOT gated — it exercises
+    // the state machine without real agents.) Pre-filter BEFORE slot selection so a skipped
+    // task never consumes an exec slot from an eligible one.
+    let exec_pool: Vec<TaskInfo> = {
+        let ready_now: Vec<&TaskInfo> = tasks.iter().filter(|t| t.status == "ready").collect();
+        let (allowed, skipped): (Vec<&TaskInfo>, Vec<&TaskInfo>) =
+            ready_now.into_iter().partition(|t| dispatch::autonomy_allows_auto_exec(t));
+        for t in &skipped {
+            println!("  exec-skip: {} (autonomy={}) — не auto, требует решения человека",
+                t.id, t.autonomy.as_deref().unwrap_or("—"));
+        }
+        allowed.into_iter().cloned().collect()
+    };
+    let exec_c: Vec<TaskInfo> = dispatch::select_for_dispatch(&exec_pool, "ready", exec_slots, args.max_per_repo)
         .into_iter().filter(|t| dispatch::task_deps_done(t, tasks)).cloned().collect();
     let review_c: Vec<TaskInfo> = dispatch::select_for_dispatch(tasks, "in-review", review_slots, args.max_per_repo)
         .into_iter().cloned().collect();

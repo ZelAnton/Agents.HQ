@@ -11,6 +11,7 @@ depends-on: [TASK-0016]
 parallel-safe-with: []
 assigned-to: null
 origin: orchestrator/ROADMAP.md (P6)
+owner: human
 session: null
 risk: null
 ---

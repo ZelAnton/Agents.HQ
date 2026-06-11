@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hq/orchestrator/plan-result",
+  "title": "plan-one DoR decision",
+  "description": "Решение DoR-гейта: готова ли задача к исполнению. Пишется plan-one.ps1, читается hq-conductor tick.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "reason"],
+  "properties": {
+    "decision": {
+      "enum": ["accept", "reject", "escalate"],
+      "description": "accept → задача готова (→ queued); reject → невалидна/дубль; escalate → нужна конкретизация или /comms."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Одна строка (RU): почему именно это решение."
+    }
+  }
+}

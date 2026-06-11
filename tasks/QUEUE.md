@@ -3,12 +3,13 @@
 Единственное место, где видно **последовательность, приоритеты и зависимости** всех задач
 (и кросс-репо, и single-repo) сразу. Правила — в [`README.md`](README.md).
 
-Обновлено: 2026-06-10 (intake TASK-0019)
+Обновлено: 2026-06-10 (intake TASK-0020)
 
 ## Активные задачи
 
 | ID | Scope | Приоритет | Статус | Repos | depends-on | parallel-safe-with | Спека |
 |----|-------|-----------|--------|-------|------------|--------------------|-------|
+| TASK-0020 | .hq-scratch-e2e-m3b | P2 | intake | .hq-scratch-e2e-m3b | — | — | `../orchestrator/tasks/TASK-0020-add-multiply-function-to-scratch-lib.md` |
 | TASK-0019 | orchestrator | P2 | intake | orchestrator | — | — | `../orchestrator/tasks/TASK-0019-test-m2-tick-dispatcher.md` |
 | TASK-0001 | vcs-toolkit-rs | P1 | queued | vcs-toolkit-rs | — | TASK-0003 | `../projects/vcs-toolkit-rs/tasks/TASK-0001-processkit-0.8-adoption.md` |
 | TASK-0002 | vcs-flow-rs | P1 | queued | vcs-flow-rs | TASK-0001 | TASK-0003 | `../projects/vcs-flow-rs/tasks/TASK-0002-processkit-0.8-adoption.md` |

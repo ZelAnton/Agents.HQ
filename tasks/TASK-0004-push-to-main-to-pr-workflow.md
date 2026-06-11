@@ -1,10 +1,10 @@
-﻿---
+---
 id: TASK-0004
 type: task
 title: Миграция workflow push-to-main → PR во всех репо
 date: 2026-06-09
 scope: cross
-status: queued
+status: ready
 priority: P2
 repos: [ProcessKit-rs, vcs-toolkit-rs, vcs-flow-rs, agent-workspace, ProcessGroup, ProcessKit, vcs-toolkit-dotNet, vcs-flow-dotnet, tessmux]
 depends-on: []

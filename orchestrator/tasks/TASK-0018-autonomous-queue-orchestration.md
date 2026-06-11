@@ -11,6 +11,7 @@ depends-on: [TASK-0017]
 parallel-safe-with: []
 assigned-to: null
 origin: human/conversation-2026-06-10
+owner: human
 session: null
 risk: null
 ---
@@ -50,13 +51,18 @@ risk: null
 - `/hq-tick`, `/hq-status`, `/hq-pause`, `/hq-resume`; `automation.json`.
 - `/loop /hq-tick` для автономного режима.
 - Секция сессий в `STATUS.md`.
+- Различать «человеческие»/мета-задачи: recovery сейчас демоутит `in-progress → ready`
+  у задач без живой сессии (напр. TASK-0017/0018), т.к. модель не отличает «человек работает»
+  от «протух claim воркера». Ввести признак (напр. `owner: human` / `manual-hold`), чтобы
+  recovery их не дёргал и авто-диспатч их исключал. Безопасно сейчас (autonomy-гейт не пускает
+  в exec), но семантически некорректно и шумит в логе тика.
 
 ## DoD
 
-- [ ] M1: `cargo build/clippy` зелёные; `/add-task` создаёт intake; `session` round-trip; doctor видит stale.
-- [ ] M2: mock-сценарий add→tick×3→done; crash→replay доводит; нет двойного claim.
-- [ ] M3: низкорисковая задача до `done` без присмотра на scratch; рисковая → DEC; N-fix → escalate.
-- [ ] M4: `/loop /hq-tick` ≥3 тика без присмотра; pause останавливает новые спавны; status актуален.
+- [x] M1: `cargo build/clippy` зелёные; `/add-task` создаёт intake; `session` round-trip; doctor видит stale.
+- [x] M2: mock-сценарий add→tick×3→done; crash→replay доводит; нет двойного claim.
+- [x] M3: низкорисковая задача до `done` без присмотра на scratch; рисковая → DEC; N-fix → escalate.
+- [x] M4: `/loop /hq-tick` ≥3 тика без присмотра; pause останавливает новые спавны; status актуален.
 
 ## Риски / зависимости
 

@@ -16,6 +16,12 @@ pub struct TaskInfo {
     /// Parsed from `depends-on: [TASK-0001, TASK-0002]`
     pub depends_on: Vec<String>,
     pub fix_attempt: u32,
+    /// `autonomy` FM field (auto-low | auto | assist | propose | human-approval | None).
+    /// Gates unattended exec in `--mode auto-low` (see `autonomy_allows_auto_exec`).
+    pub autonomy: Option<String>,
+    /// `owner` FM field (`human` | `agent:<id>` | None). Tasks with `owner: human` are
+    /// skipped by recovery revert — they are human-managed and have no agent claim by design.
+    pub owner: Option<String>,
     pub assigned_to: Option<String>,
     pub lease_until: Option<chrono::DateTime<chrono::Utc>>,
     pub owner_pid: Option<u32>,
@@ -55,6 +61,8 @@ fn task_from_path(path: &Path) -> Option<TaskInfo> {
         priority,
         depends_on,
         fix_attempt,
+        autonomy: optional_str(&pairs, "autonomy"),
+        owner: optional_str(&pairs, "owner"),
         assigned_to: optional_str(&pairs, "assigned-to"),
         lease_until,
         owner_pid,
@@ -121,6 +129,29 @@ pub fn task_is_free(task: &TaskInfo) -> bool {
     owner_reclaimable(&task.owner_host, task.owner_pid, task.lease_until)
 }
 
+// ---------- Autonomy gate ----------
+
+/// Does this task's autonomy permit unattended (auto) execution by the conductor?
+/// Fail-closed: only explicit `auto-low`/`auto` qualify. Missing / `propose` / `assist` /
+/// `human-approval` → false. This is the gate that keeps a `--mode auto-low` tick from
+/// spawning executors (which create jj workspaces + spend LLM) against repos that never
+/// opted into automation — notably product repos, which must stay untouched during M3.
+/// Repo-level autonomy inheritance (a future repos catalog) can widen this later; until
+/// then a task opts in explicitly via its `autonomy` FM field.
+pub fn autonomy_allows_auto_exec(task: &TaskInfo) -> bool {
+    matches!(task.autonomy.as_deref(), Some("auto-low") | Some("auto"))
+}
+
+/// Is this task human-managed (`owner: human`)? Such tasks are excluded from BOTH recovery
+/// (no agent claim to reconcile — the human drives transitions) AND auto-dispatch (the tick
+/// never spawns plan/exec/review against them). Distinct from the autonomy gate: `autonomy`
+/// opts a task INTO unattended exec; `owner: human` opts it OUT of all automatic handling.
+/// This is what keeps meta/human tasks (e.g. TASK-0017/0018) from being demoted or dispatched
+/// on every tick — semantically correct, and removes log noise the autonomy gate alone left.
+pub fn is_human_owned(task: &TaskInfo) -> bool {
+    task.owner.as_deref() == Some("human")
+}
+
 // ---------- Dependency check ----------
 
 /// Are all `depends-on` tasks in a terminal state (done / cancelled / rejected)?
@@ -145,6 +176,8 @@ fn priority_ord(p: &str) -> u8 {
 /// NB: `max_per_repo` is applied PER ROLE (this call is one role). A repo may thus have
 /// up to `max_per_repo` tasks in flight in each of plan/exec/review simultaneously — by
 /// design, since the three are distinct resources (planner/exec/reviewer slots).
+/// `owner: human` tasks are never selected (see `is_human_owned`) — this is the single
+/// chokepoint, so all callers (mock + live, all three roles) inherit the exclusion.
 pub fn select_for_dispatch<'a>(
     tasks: &'a [TaskInfo],
     target_status: &str,
@@ -154,7 +187,7 @@ pub fn select_for_dispatch<'a>(
     if available_slots == 0 { return vec![]; }
     let mut eligible: Vec<&TaskInfo> = tasks
         .iter()
-        .filter(|t| t.status == target_status && task_is_free(t))
+        .filter(|t| t.status == target_status && task_is_free(t) && !is_human_owned(t))
         .collect();
     eligible.sort_by_key(|t| priority_ord(&t.priority));
     let mut repo_counts: std::collections::HashMap<String, usize> = Default::default();

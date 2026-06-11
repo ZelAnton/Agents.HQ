@@ -12,6 +12,7 @@ parallel-safe-with: []  # [TASK-####] — можно параллельно
 assigned-to: null       # claim оркестратором
 origin: null            # IDEA-... | T-...#NN | DEC-... | MSG-... | human
 created-by: null        # human | agent:<repo>
+owner: null             # human | agent:<repo> — кто УПРАВЛЯЕТ задачей; owner:human исключает её из авто-recovery и авто-диспатча
 risk: null              # low | medium | high — ставит планировщик
 fix-attempt: 0          # счётчик неуспешных review-fix циклов
 session: null           # SESS-TASK-####-... — активная/последняя сессия
