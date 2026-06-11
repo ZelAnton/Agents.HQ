@@ -1,10 +1,10 @@
-﻿---
+---
 id: TASK-0001
 type: task
 title: vcs-toolkit-rs — переход на ProcessKit 0.8
 date: 2026-06-09
 scope: vcs-toolkit-rs
-status: queued
+status: ready
 priority: P1
 repos: [vcs-toolkit-rs]
 depends-on: []

@@ -1,10 +1,10 @@
-﻿---
+---
 id: TASK-0003
 type: task
 title: agent-workspace — переход на ProcessKit 0.8
 date: 2026-06-09
 scope: agent-workspace
-status: queued
+status: ready
 priority: P1
 repos: [agent-workspace]
 depends-on: []
