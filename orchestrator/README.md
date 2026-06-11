@@ -249,9 +249,21 @@ flowchart TD
 ```
 .hq/orchestrator/
 ├── README.md          ← этот файл (как работает + схемы)
-├── ROADMAP.md         ← фазы 0–6 (crawl→walk→run)
+├── ROADMAP.md         ← фазы 0–6 (crawl→walk→run) + P6 as-built
 ├── IMPLEMENTATION.md  ← детальный план: контракты агентов, состояние, интеграция, риски
-└── RATIONALE.md       ← раунды генерация→критика, альтернативы, решения
+├── RATIONALE.md       ← раунды генерация→критика, альтернативы, решения
+├── STATE.md           ← as-built форматы и правила состояния (тик, поля, сессии, automation)
+├── automation.json    ← стоп-кран + лимиты (paused, max_plan/exec/review)
+├── STATUS.md          ← генерируемый дашборд тика
+├── bin/               ← hq-conductor (Rust) + воркеры (exec-/plan-/verify-/land-only.ps1) + обёртки
+├── skills/            ← /add-task · /hq-tick · /hq-status · /hq-pause · /hq-resume · /comms
+├── agents/            ← системные промпты LLM-ролей (hq-dor/exec/verify/planner/triage/merge)
+├── schemas/           ← JSON-контракты (task/claim/session/verify/plan-result/…)
+├── sessions/          ← живая память выполнения (active/ + _archive/, git-ignored)
+└── _runs/             ← журнал тиков (tick.json + артефакты ролей, git-ignored)
 ```
 Рабочее состояние оркестра — в существующих папках `.hq`: `comms/`, `tasks/QUEUE.md`, `projects/`,
-`human/`, плюс `orchestrator/_runs/` (логи тиков) и `orchestrator/STATUS.md` (дашборд).
+`human/`. **Реализованный автономный контур** (три очереди, сессии, стоп-кран, skills) описан
+as-built в [`STATE.md`](STATE.md) и [`ROADMAP.md §P6`](ROADMAP.md); концептуальная картина выше
+(Triage→Planner→Executor→Merge→Verifier) — это полная целевая модель, текущая реализация —
+её безопасное подмножество (plan/exec/review + авто-land низкого риска).

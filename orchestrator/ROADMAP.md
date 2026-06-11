@@ -115,6 +115,31 @@ flowchart LR
 **Exit.** Несколько тиков подряд без присмотра с восстановлением после сбоя; дашборд и метрики;
 воспроизводимые прогоны в тестах.
 
+### P6 · as-built (TASK-0018 «Автономный агентный процесс», M1–M4)
+
+Реализованный поверх `hq-conductor` автономный контур из трёх очередей (plan/exec/review).
+Операционные форматы и правила — в [`STATE.md`](STATE.md). Кратко:
+- **M1** — state machine (11 статусов + производный `stale`), каталог сессий
+  (`sessions/{active,_archive}/`, `session.schema.json`, heartbeat/lease/gc), `/add-task`.
+- **M2** — детерминированный `hq-conductor tick` (recovery → promote → dispatch → finalize),
+  режим `mock`, идемпотентный журнал `tick.json` (crash-safe реконсиляция).
+- **M3** — живые агенты на scratch: exec (Sonnet) → review (Opus) → авто-land низкорисковых
+  (`land-only.ps1`), bounded fix-loop (review fail → `fix-needed` → информированный re-exec → escalate
+  после N), DoR-гейт (`hq-dor`).
+- **M4** — супервизор и наблюдаемость: `/hq-tick` (тело `/loop`), `/hq-status`, kill-switch
+  `automation.json` + `/hq-pause` / `/hq-resume`, признак `owner: human` (мета-задачи вне
+  авто-обслуживания), секция сессий в `STATUS.md`.
+
+**Гейты безопасности (as-built):** безнадзорный exec — только для задач с `autonomy: auto-low|auto`
+(fail-closed; продуктовые репо без явного opt-in не трогаются); leak-скан diff'а и чувствительные
+пути блокируют авто-land → DEC; `owner: human` опт-аутит из всего; fix-loop ограничен N.
+
+### Будущее (вне текущего объёма)
+- **Tray-app супервизора** (Windows tray, автозапуск, UI) — хост петли тиков вместо `/loop /hq-tick`.
+- **Каталог репо** с repo-уровневым наследованием `autonomy` (сейчас — opt-in полем задачи).
+- **Provider-адаптеры** (Codex/Copilot/Qwen) за shim вокруг вызова исполнителя (сейчас Claude-only).
+- **Бюджеты токенов/итераций** + record/replay тиков; **tessmux-дашборд** живой сетки сессий.
+
 ---
 
 ## Сквозные правила перехода между фазами
